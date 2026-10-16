@@ -1,20 +1,25 @@
 name: CI
 
+# push covers every branch in this repo (tag pushes don't match `branches`).
+# pull_request is still needed for fork PRs, whose pushes never trigger here.
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches: ['**']
+  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   go-checks:
     name: Go build, vet & test
+    # Same-repo PR branches are already checked by their push run; only fork
+    # PRs need the pull_request run.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
 
     steps:
