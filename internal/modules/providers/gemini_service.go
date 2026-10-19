@@ -114,18 +114,18 @@ func (c *Client) Init(ctx context.Context) error {
 	configPSIDTS := cleanCookie(c.cookies.Secure1PSIDTS) // Save original config value
 	c.cookies.Secure1PSIDTS = configPSIDTS
 
-	// Check if we should use cached cookies or clear cache
+	// Check if we should use cached cookies or clear cache.
+	// The cached TS is written after every successful rotation, so it is
+	// ALWAYS newer than the TS baked into the env/config. Prefer it; only
+	// treat a differing config TS as authoritative when the cache is empty
+	// (first run with a brand-new paste).
 	if c.cookies.Secure1PSID != "" {
 		cachedTS, err := c.LoadCachedCookies()
-
-		// If config has a new PSIDTS that differs from cache, clear cache and use config
-		if configPSIDTS != "" && cachedTS != "" && configPSIDTS != cachedTS {
-			_ = c.ClearCookieCache()
-			// Keep using the config value (already set above)
-		} else if err == nil && cachedTS != "" && configPSIDTS == "" {
-			// Only use cache if config doesn't provide PSIDTS
-			c.cookies.Secure1PSIDTS = cachedTS
-			c.log.Info("Loaded __Secure-1PSIDTS from cache")
+		if err == nil && cachedTS != "" {
+			if configPSIDTS == "" || configPSIDTS != cachedTS {
+				c.cookies.Secure1PSIDTS = cachedTS
+				c.log.Info("Loaded rotated __Secure-1PSIDTS from cache (newer than config value)")
+			}
 		}
 	}
 
@@ -200,6 +200,7 @@ func (c *Client) refreshSessionToken(ctx context.Context) error {
 	psidts := c.cookies.Secure1PSIDTS
 	c.cookies.mu.RUnlock()
 	cookieStr := mergeCookieHeaders(extraCookies, c.configuredCookieHeader,
+		c.LoadFullCookieHeader(),
 		fmt.Sprintf("__Secure-1PSID=%s; __Secure-1PSIDTS=%s", psid, psidts))
 
 	commonHeaders := map[string]string{
@@ -1483,7 +1484,28 @@ func (c *Client) SaveCachedCookies() error {
 	} else {
 		c.log.Warn("Failed to save cookies to cache", zap.String("file", filename), zap.Error(err))
 	}
+	// Persist the FULL merged cookie header (rotation may refresh SIDCC/NID
+	// too) so a sidecar restart can restore the exact live session.
+	if strings.TrimSpace(c.cookieHeader) != "" {
+		fullPath := filepath.Join(".cookies", hex.EncodeToString(hash[:])+".full")
+		_ = os.WriteFile(fullPath, []byte(c.cookieHeader), 0600)
+	}
 	return err
+}
+
+// LoadFullCookieHeader returns the last persisted full cookie header for the
+// configured __Secure-1PSID, or "" when none exists.
+func (c *Client) LoadFullCookieHeader() string {
+	if c.cookies.Secure1PSID == "" {
+		return ""
+	}
+	hash := sha256.Sum256([]byte(c.cookies.Secure1PSID))
+	fullPath := filepath.Join(".cookies", hex.EncodeToString(hash[:])+".full")
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // ClearCookieCache deletes the cached cookie file for the current PSID
