@@ -121,6 +121,31 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 
 	if req.HasToolsEnabled() {
 		toolCalls, content := s.parseToolBridgeOutput(req, utils.SanitizeGeminiMarkup(response.Text))
+
+		// Verification gate: when the conversation already executed tool calls
+		// and the model produces its final prose answer, run ONE extra bridge
+		// round demanding proof citations. This counteracts the model's
+		// optimistic-reporter pattern (claiming unverified successes). If the
+		// gate produces more tool calls (actual verification), return them so
+		// the client can execute; otherwise use the audited content.
+		if len(toolCalls) == 0 && content != "" && req.ToolChoiceMode() != "none" && conversationHadToolResults(req) {
+			gatePrompt := prompt + "\n\nFINAL ANSWER AUDIT (mandatory): You just produced the final report below. Before it is delivered, audit every success claim in it:\n" +
+				"1. List each claim of a created file, passing test, or completed fix.\n" +
+				"2. For each, check whether an actual tool result in this conversation proves it. If ANY claim lacks proof, do NOT rewrite the report in prose — instead return {\"tool_calls\":[...]} with the verification commands (ls/cat/run test) needed to prove them.\n" +
+				"3. Only if every claim is already proven by tool results, return {\"content\":\"<same report, with unproven items marked NOT VERIFIED>\"}.\n" +
+				"Report to audit:\n" + content
+			if gateResp, gateErr := s.client.GenerateContent(ctx, gatePrompt, opts...); gateErr == nil {
+				gateText := utils.SanitizeGeminiMarkup(gateResp.Text)
+				if gc, gcontent := s.parseToolBridgeOutput(req, gateText); len(gc) > 0 {
+					// model wants to actually verify — let the loop continue
+					toolCalls = gc
+					content = ""
+				} else if gcontent != "" && !looksLikeBrokenBridgeOutput(gcontent) {
+					content = gcontent
+				}
+			}
+		}
+
 		// Repair retry: the model sometimes answers in prose/fences instead of
 		// the JSON contract. One corrective round-trip rescues most of those,
 		// which keeps agent loops from stalling on a malformed step.
@@ -153,6 +178,9 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 			if len(fallback) > 0 && (req.ToolChoiceMode() == "required" || req.ToolChoiceMode() == "function") {
 				toolCalls = fallback
 			}
+		}
+		if len(toolCalls) == 0 {
+			content = unwrapNestedBridgeContent(content)
 		}
 
 		if len(toolCalls) > 0 {
@@ -560,6 +588,12 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("- If a tool fails, analyze the error and retry with corrected arguments instead of giving up.\n")
 	b.WriteString("- Do NOT emit tool calls as plain text like [Call Tool: ...] — only inside the JSON above.\n")
 	b.WriteString("- SIZE LIMIT: keep each reply under ~6000 characters. When a file is large, write it in APPEND-friendly chunks: first chunk with the beginning of the file, then continue the rest in the next tool call after seeing the result. Never try to emit a whole large file in one reply — truncated JSON is discarded.\n")
+	b.WriteString("\nTRUTH CONTRACT (highest priority, overrides optimism):\n")
+	b.WriteString("- NEVER claim a result, test, or artifact exists unless a tool result in this conversation PROVES it. No proof = report it as NOT VERIFIED.\n")
+	b.WriteString("- Before reporting any file/test/fix as done, RUN a verification tool call (read_file, ls, cat, run the test) and quote its actual output in your report.\n")
+	b.WriteString("- If you catch yourself about to state a success you did not observe, STOP and issue the tool call that would prove it instead.\n")
+	b.WriteString("- Distinguish clearly in your final report: VERIFIED (tool output seen) vs ASSUMED (reasoned but not run) vs NOT RUN. Never upgrade ASSUMED to VERIFIED.\n")
+	b.WriteString("- If a previous statement of yours turns out to be false, acknowledge it explicitly and correct it — never defend or quietly replace it.\n")
 
 	toolChoiceMode := req.ToolChoiceMode()
 	if toolChoiceMode == "required" {
@@ -711,6 +745,38 @@ func allowedName(allowed map[string]struct{}, name string) bool {
 	}
 	if len(allowed) == 0 {
 		return name != ""
+	}
+	return false
+}
+
+// unwrapNestedBridgeContent fixes the model double-encoding its answer: the
+// bridge "content" value sometimes itself contains a {"content": "..."} JSON
+// object (from the audit/gate round). Unwrap recursively, at most 3 layers.
+func unwrapNestedBridgeContent(content string) string {
+	c := strings.TrimSpace(content)
+	for i := 0; i < 3; i++ {
+		if !strings.HasPrefix(c, "{") || !strings.Contains(c, "\"content\"") {
+			break
+		}
+		var probe struct {
+			Content   string          `json:"content"`
+			ToolCalls json.RawMessage `json:"tool_calls"`
+		}
+		if err := json.Unmarshal([]byte(c), &probe); err != nil || probe.Content == "" {
+			break
+		}
+		c = strings.TrimSpace(probe.Content)
+	}
+	return c
+}
+
+// conversationHadToolResults reports whether any request message is a tool
+// result, i.e. the agent loop already executed at least one tool.
+func conversationHadToolResults(req dto.ChatCompletionRequest) bool {
+	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			return true
+		}
 	}
 	return false
 }
