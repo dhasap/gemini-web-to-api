@@ -1,6 +1,7 @@
 package server
 
 import (
+	"os"
 	"context"
 	"fmt"
 	"time"
@@ -69,7 +70,7 @@ func Register404Handler(app *fiber.App) {
 // RegisterFiberLifecycle registers the Fiber app lifecycle hooks
 func RegisterFiberLifecycle(lc fx.Lifecycle, app *fiber.App, cfg *configs.Config, log *zap.Logger) {
 	port := cfg.Server.Port
-	address := fmt.Sprintf(":%s", port)
+	address := fmt.Sprintf("%s:%s", func() string { if h := os.Getenv("HOST"); h != "" { return h }; return "127.0.0.1" }(), port)
 
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {

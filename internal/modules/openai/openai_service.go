@@ -488,13 +488,21 @@ type toolBridgeCall struct {
 
 func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, basePrompt string) string {
 	var b strings.Builder
-	b.WriteString("You are an OpenAI-compatible assistant running behind a bridge to Gemini web.\n")
-	b.WriteString("You MUST respond with JSON only. Do not output markdown code fences.\n")
-	b.WriteString("Output schema:\n")
-	b.WriteString("{\"tool_calls\":[{\"name\":\"<tool_name>\",\"arguments\":{}}]} OR {\"content\":\"<assistant_text>\"}\n")
-	b.WriteString("Rules:\n")
-	b.WriteString("- Use only tool names listed below.\n")
-	b.WriteString("- arguments must be valid JSON object.\n")
+	b.WriteString("You are an AI agent with tool access, running behind a bridge to Gemini web.\n")
+	b.WriteString("You are in an AUTONOMOUS AGENT LOOP. The client executes every tool call you return and sends the result back as the next message. You keep going until the whole task is done.\n")
+	b.WriteString("\nOUTPUT CONTRACT (strict):\n")
+	b.WriteString("Your ENTIRE reply must be exactly ONE JSON object — no prose before or after, no markdown fences.\n")
+	b.WriteString("To call tools:  {\"tool_calls\":[{\"name\":\"<tool_name>\",\"arguments\":{...}}, ...]}\n")
+	b.WriteString("To answer the user:  {\"content\":\"<assistant_text>\"}\n")
+	b.WriteString("Both may be combined when useful:  {\"content\":\"...\",\"tool_calls\":[...]}\n")
+	b.WriteString("\nRULES:\n")
+	b.WriteString("- Use only the tool names listed below.\n")
+	b.WriteString("- \"arguments\" must be a valid JSON object matching the tool's parameter schema.\n")
+	b.WriteString("- You may return MULTIPLE tool_calls in one reply to parallelize independent steps.\n")
+	b.WriteString("- After each tool result arrives, CONTINUE: decide the next action and either call more tools or finish with {\"content\"}.\n")
+	b.WriteString("- NEVER ask the user for permission to continue. NEVER stop halfway. NEVER say you cannot proceed — work with the results you have and keep iterating until the task is fully complete.\n")
+	b.WriteString("- If a tool fails, analyze the error and retry with corrected arguments instead of giving up.\n")
+	b.WriteString("- Do NOT emit tool calls as plain text like [Call Tool: ...] — only inside the JSON above.\n")
 
 	toolChoiceMode := req.ToolChoiceMode()
 	if toolChoiceMode == "required" {
@@ -512,7 +520,7 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 		b.WriteString("- Tool calling disabled. Return only {\"content\":\"...\"}.\n")
 	}
 
-	b.WriteString("Available tools:\n")
+	b.WriteString("\nAvailable tools:\n")
 	for _, t := range req.Tools {
 		if !strings.EqualFold(t.Type, "function") || strings.TrimSpace(t.Function.Name) == "" {
 			continue
@@ -582,11 +590,72 @@ func (s *OpenAIService) parseToolBridgeOutput(req dto.ChatCompletionRequest, tex
 		})
 	}
 
+	// Recovery: some replies leak tool calls as plain text, e.g.
+	// "[Call Tool: terminal with ID x and Input: {...}]" (the bridge echo format)
+	// or "I will call the terminal tool now." — mine them before giving up.
+	if len(calls) == 0 {
+		recovered := recoverTextualToolCalls(text, allowed)
+		calls = append(calls, recovered...)
+	}
+
 	content := strings.TrimSpace(payload.Content)
 	if content == "" && len(calls) == 0 {
 		content = strings.TrimSpace(text)
 	}
 	return calls, content
+}
+
+// recoverTextualToolCalls scrapes tool-call intents that the model wrote as
+// plain text instead of the JSON contract. Handles the two shapes seen in
+// practice: the bridge's own "[Call Tool: <name> ... Input: <json>]" echo and
+// markdown-ish "**tool_name**({...})" emissions.
+func recoverTextualToolCalls(text string, allowed map[string]struct{}) []dto.ChatCompletionToolCall {
+	calls := make([]dto.ChatCompletionToolCall, 0)
+	// Shape 1: [Call Tool: <name> with ID <id> and Input: <json>]
+	reBridge := regexp.MustCompile(`\[Call Tool:\s*([^\]]+?)\s+Input:\s*(\{.*?\})\s*\]`)
+	for i, m := range reBridge.FindAllStringSubmatch(text, -1) {
+		name := strings.TrimSpace(m[1])
+		// name capture may include the echo's "with ID <id> and" tail — strip it
+		if idx := strings.Index(name, " with ID "); idx >= 0 {
+			name = strings.TrimSpace(name[:idx])
+		}
+		name = strings.TrimSuffix(name, " and")
+		if !allowedName(allowed, name) {
+			continue
+		}
+		calls = append(calls, dto.ChatCompletionToolCall{
+			ID:       fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), 1000+i),
+			Type:     "function",
+			Function: dto.ChatCompletionToolCallFunction{Name: name, Arguments: normalizeArguments(json.RawMessage(m[2]))},
+		})
+	}
+	if len(calls) > 0 {
+		return calls
+	}
+	// Shape 2: bare {"name": "...", "arguments"/"parameters": {...}} objects anywhere in prose.
+	reObj := regexp.MustCompile(`\{[^{}]*"(?:name)"\s*:\s*"([^"]+)"[^{}]*"(?:arguments|parameters|input)"\s*:\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})[^{}]*\}`)
+	for i, m := range reObj.FindAllStringSubmatch(text, -1) {
+		name := strings.TrimSpace(m[1])
+		if !allowedName(allowed, name) {
+			continue
+		}
+		calls = append(calls, dto.ChatCompletionToolCall{
+			ID:       fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), 2000+i),
+			Type:     "function",
+			Function: dto.ChatCompletionToolCallFunction{Name: name, Arguments: normalizeArguments(json.RawMessage(m[2]))},
+		})
+	}
+	return calls
+}
+
+func allowedName(allowed map[string]struct{}, name string) bool {
+	if _, ok := allowed[name]; ok {
+		return true
+	}
+	if len(allowed) == 0 {
+		return name != ""
+	}
+	return false
 }
 
 func (s *OpenAIService) buildFallbackToolCalls(req dto.ChatCompletionRequest) []dto.ChatCompletionToolCall {

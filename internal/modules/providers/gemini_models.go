@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"os"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -321,6 +322,19 @@ func resolveGeminiModel(requested string, models []geminiModel) (geminiModel, er
 	lookup := requested
 	if lookup == "gemini-advanced" {
 		lookup = "gemini-pro"
+	}
+	// GEMINI_MODEL_ALIASES: comma-separated "name=target" pairs mapping friendly
+	// model names onto whatever the account registry actually exposes (e.g. when
+	// the web UI only lists "Auto", explicit names still route through it).
+	for _, pair := range strings.Split(os.Getenv("GEMINI_MODEL_ALIASES"), ",") {
+		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(kv[0])) == lookup {
+			lookup = strings.ToLower(strings.TrimSpace(kv[1]))
+			break
+		}
 	}
 	matching := func(match func(string) bool) []geminiModel {
 		var found []geminiModel
