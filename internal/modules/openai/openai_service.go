@@ -50,7 +50,7 @@ func (s *OpenAIService) ValidateChatCompletion(req dto.ChatCompletionRequest) er
 	if err := utils.ValidateGenerationRequest(req.Model, req.MaxTokens, req.Temperature); err != nil {
 		return err
 	}
-	if _, err := providers.ParseThinkingLevel(geminiThinkingLevel(req.ReasoningEffort)); err != nil {
+	if _, err := providers.ParseThinkingLevel(geminiThinkingLevel(req.EffectiveReasoningEffort())); err != nil {
 		return fmt.Errorf("invalid reasoning_effort: %w", err)
 	}
 	_, err := s.client.ResolveModel(req.Model)
@@ -87,7 +87,7 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 		prompt = s.buildToolBridgePrompt(req, prompt)
 	}
 
-	opts := []providers.GenerateOption{providers.WithThinkingLevel(geminiThinkingLevel(req.ReasoningEffort))}
+	opts := []providers.GenerateOption{providers.WithThinkingLevel(geminiThinkingLevel(req.EffectiveReasoningEffort()))}
 	if req.Model != "" {
 		opts = append(opts, providers.WithModel(req.Model))
 	}
@@ -100,7 +100,12 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 	}
 
 	// Logic: Call Provider
-	response, err := s.client.GenerateContent(ctx, prompt, opts...)
+	var response *providers.Response
+	var gErr error
+	response, gErr = s.client.GenerateContent(ctx, prompt, opts...)
+	if gErr != nil {
+		return nil, gErr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +115,19 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 
 	if req.HasToolsEnabled() {
 		toolCalls, content := s.parseToolBridgeOutput(req, response.Text)
+		// Repair retry: the model sometimes answers in prose/fences instead of
+		// the JSON contract. One corrective round-trip rescues most of those,
+		// which keeps agent loops from stalling on a malformed step.
+		if len(toolCalls) == 0 && req.ToolChoiceMode() != "none" && looksLikeBrokenBridgeOutput(content) {
+			repairPrompt := prompt + "\n\nIMPORTANT: Your previous reply was NOT a single valid JSON object, so it was discarded. Reply again with EXACTLY one JSON object — either {\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}]} or {\"content\":\"...\"} — and nothing else."
+			if retryResp, retryErr := s.client.GenerateContent(ctx, repairPrompt, opts...); retryErr == nil {
+				if rc, rcontent := s.parseToolBridgeOutput(req, retryResp.Text); len(rc) > 0 || rcontent != "" {
+					toolCalls = rc
+					content = rcontent
+					response = retryResp
+				}
+			}
+		}
 		if len(toolCalls) == 0 {
 			fallback := s.buildFallbackToolCalls(req)
 			if len(fallback) > 0 && (req.ToolChoiceMode() == "required" || req.ToolChoiceMode() == "function") {
@@ -374,8 +392,26 @@ func (s *OpenAIService) CreateChatCompletionStream(ctx context.Context, req dto.
 	created := response.Created
 	choice := response.Choices[0]
 
-	// Case 1: Tool Calls
+	// Case 1: Tool Calls (reasoning first, then calls)
 	if len(choice.Message.ToolCalls) > 0 {
+		if choice.Message.ReasoningContent != "" {
+			reasoningChunks := utils.SplitResponseIntoChunks(choice.Message.ReasoningContent, 40)
+			for _, content := range reasoningChunks {
+				delta := dto.ChatCompletionChunkDelta{ReasoningContent: content, Role: "assistant"}
+				if !onEvent(dto.ChatCompletionChunk{
+					ID:      chunkID,
+					Object:  "chat.completion.chunk",
+					Created: created,
+					Model:   response.Model,
+					Choices: []dto.ChunkChoice{{Index: 0, Delta: delta}},
+				}) {
+					return nil
+				}
+				if !utils.SleepWithCancel(ctx, 20*time.Millisecond) {
+					return nil
+				}
+			}
+		}
 		for i, tc := range choice.Message.ToolCalls {
 			delta := dto.ChatCompletionChunkDelta{}
 			if i == 0 {
@@ -418,7 +454,7 @@ func (s *OpenAIService) CreateChatCompletionStream(ctx context.Context, req dto.
 	// Case 2: Regular Text
 	firstChunk := true
 	if choice.Message.ReasoningContent != "" {
-		reasoningChunks := utils.SplitResponseIntoChunks(choice.Message.ReasoningContent, 30)
+		reasoningChunks := utils.SplitResponseIntoChunks(choice.Message.ReasoningContent, 40)
 		for _, content := range reasoningChunks {
 			delta := dto.ChatCompletionChunkDelta{ReasoningContent: content}
 			if firstChunk {
@@ -437,13 +473,13 @@ func (s *OpenAIService) CreateChatCompletionStream(ctx context.Context, req dto.
 			}) {
 				return nil
 			}
-			if !utils.SleepWithCancel(ctx, 30*time.Millisecond) {
+			if !utils.SleepWithCancel(ctx, 15*time.Millisecond) {
 				return nil
 			}
 		}
 	}
 
-	chunks := utils.SplitResponseIntoChunks(choice.Message.Content, 30)
+	chunks := utils.SplitResponseIntoChunks(choice.Message.Content, 40)
 	for _, content := range chunks {
 		delta := dto.ChatCompletionChunkDelta{Content: content}
 		if firstChunk {
@@ -459,7 +495,7 @@ func (s *OpenAIService) CreateChatCompletionStream(ctx context.Context, req dto.
 		}) {
 			return nil
 		}
-		if !utils.SleepWithCancel(ctx, 30*time.Millisecond) {
+		if !utils.SleepWithCancel(ctx, 15*time.Millisecond) {
 			return nil
 		}
 	}
@@ -734,4 +770,22 @@ func normalizeArguments(raw json.RawMessage) string {
 		return "{}"
 	}
 	return compact.String()
+}
+
+// looksLikeBrokenBridgeOutput reports whether a no-tool-call reply probably
+// SHOULD have been a bridge JSON payload (prose around tool intents, fenced
+// JSON, or a stray object) and is worth one repair retry.
+func looksLikeBrokenBridgeOutput(content string) bool {
+	c := strings.TrimSpace(content)
+	if c == "" {
+		return false
+	}
+	if strings.Contains(c, "tool_calls") || strings.Contains(c, "[Call Tool") {
+		return true
+	}
+	t := utils.StripCodeFence(c)
+	if strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
+		return true
+	}
+	return false
 }

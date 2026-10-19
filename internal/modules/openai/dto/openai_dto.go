@@ -205,6 +205,41 @@ type ChatCompletionRequest struct {
 	Temperature     float32                 `json:"temperature,omitempty"`
 	MaxTokens       int                     `json:"max_tokens,omitempty"`
 	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
+	// Anthropic-style thinking control: {"type":"enabled","budget_tokens":N}
+	Thinking json.RawMessage `json:"thinking,omitempty"`
+	// Generic reasoning control: {"effort":"high"} or {"max_tokens":N}
+	Reasoning json.RawMessage `json:"reasoning,omitempty"`
+}
+
+// EffectiveReasoningEffort resolves the reasoning effort from every accepted
+// client dialect (OpenAI reasoning_effort, Anthropic thinking, generic
+// reasoning object). Precedence: reasoning_effort > thinking > reasoning.
+func (r ChatCompletionRequest) EffectiveReasoningEffort() string {
+	if e := strings.TrimSpace(r.ReasoningEffort); e != "" {
+		return e
+	}
+	if len(r.Thinking) > 0 {
+		var t struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(r.Thinking, &t) == nil {
+			if strings.EqualFold(t.Type, "enabled") {
+				return "high"
+			}
+			if strings.EqualFold(t.Type, "disabled") {
+				return "low"
+			}
+		}
+	}
+	if len(r.Reasoning) > 0 {
+		var rr struct {
+			Effort string `json:"effort"`
+		}
+		if json.Unmarshal(r.Reasoning, &rr) == nil && strings.TrimSpace(rr.Effort) != "" {
+			return rr.Effort
+		}
+	}
+	return ""
 }
 
 func (r ChatCompletionRequest) ToModelMessages() []models.Message {

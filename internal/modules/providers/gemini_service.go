@@ -994,6 +994,9 @@ func (c *Client) ListModelsIDs() []string {
 
 // parseResponse parses Gemini's response format
 func (c *Client) parseResponse(text string) (*Response, error) {
+	if dumpPath := os.Getenv("GEMINI_DEBUG_RAW"); dumpPath != "" {
+		_ = os.WriteFile(dumpPath, []byte(text), 0644)
+	}
 	var finalResText string
 	var finalMetadata map[string]any
 	found := false
