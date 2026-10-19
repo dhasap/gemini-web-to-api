@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -292,4 +293,28 @@ func ExtractThinkingAndText(raw string) (string, string) {
 
 	textContent := strings.TrimSpace(textBefore + textAfter)
 	return thinking, textContent
+}
+
+// geminiUIArtifactRegexes strips Gemini Web UI artifacts that leak into the
+// response text and confuse API consumers: interactive card markup
+// (Section/TextBox/Chip/...) and canvas/code-event pseudo-fences.
+var (
+	geminiSectionTags = regexp.MustCompile(`(?s)</?(Section|TextBox|Chip|ListItem|Carousel|Card|Accordion|Table|Button|ImageUrl|IMageUrl|ListItemTitle|List|MenuItem|Preview|Score|Subtitle|Title|Video|Audio|HtmlRender|Edits\b)[^>]*>?`)
+	geminiEventFence  = regexp.MustCompile("(?m)^```([a-z]+)\\?[^`\\n]*```")
+	geminiEventFence2 = regexp.MustCompile("(?m)^```([a-z]+)\\?[^\\n]*$")
+)
+
+// SanitizeGeminiMarkup removes Gemini Web UI artifacts and normalizes
+// code-event fences ("```python?code_reference&code_event_index=1") into
+// plain markdown fences so clients receive clean text.
+func SanitizeGeminiMarkup(text string) string {
+	if text == "" || !strings.ContainsAny(text, "<`") {
+		return text
+	}
+	out := geminiSectionTags.ReplaceAllString(text, "")
+	out = geminiEventFence.ReplaceAllString(out, "```$1")
+	out = geminiEventFence2.ReplaceAllString(out, "```$1")
+	// collapse >2 consecutive blank lines left by removed tags
+	out = regexp.MustCompile(`\n{3,}`).ReplaceAllString(out, "\n\n")
+	return strings.TrimSpace(out)
 }

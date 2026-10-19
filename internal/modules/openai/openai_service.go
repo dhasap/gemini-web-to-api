@@ -82,6 +82,12 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 	if prompt == "" {
 		return nil, fmt.Errorf("no valid content in messages")
 	}
+	// Nudge the web model toward clean API behavior: it sometimes answers with
+	// interactive-UI markup or apologizing boilerplate. A light contract line
+	// (only when the client sent no system prompt) keeps replies plain.
+	if !req.HasSystemMessage() {
+		prompt = "Respond as a plain-text API model: clean markdown, no interactive UI elements, no meta commentary.\n\n" + prompt
+	}
 
 	if req.HasToolsEnabled() {
 		prompt = s.buildToolBridgePrompt(req, prompt)
@@ -114,14 +120,14 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 	finishReason := "stop"
 
 	if req.HasToolsEnabled() {
-		toolCalls, content := s.parseToolBridgeOutput(req, response.Text)
+		toolCalls, content := s.parseToolBridgeOutput(req, utils.SanitizeGeminiMarkup(response.Text))
 		// Repair retry: the model sometimes answers in prose/fences instead of
 		// the JSON contract. One corrective round-trip rescues most of those,
 		// which keeps agent loops from stalling on a malformed step.
 		if len(toolCalls) == 0 && req.ToolChoiceMode() != "none" && looksLikeBrokenBridgeOutput(content) {
 			repairPrompt := prompt + "\n\nIMPORTANT: Your previous reply was NOT a single valid JSON object, so it was discarded. Do not apologize, do not refuse, do not ask to start over — the task itself is allowed. Reply again with EXACTLY one JSON object — either {\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}]} or {\"content\":\"...\"} — and nothing else. If the step is genuinely blocked, return {\"content\":\"<what is blocked and what you need>\"} instead of a stock refusal."
 			if retryResp, retryErr := s.client.GenerateContent(ctx, repairPrompt, opts...); retryErr == nil {
-				if rc, rcontent := s.parseToolBridgeOutput(req, retryResp.Text); len(rc) > 0 || rcontent != "" {
+				if rc, rcontent := s.parseToolBridgeOutput(req, utils.SanitizeGeminiMarkup(retryResp.Text)); len(rc) > 0 || rcontent != "" {
 					toolCalls = rc
 					content = rcontent
 					response = retryResp
@@ -142,7 +148,7 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 			message.Content = content
 		}
 	} else {
-		content := imagePlaceholderRegex.ReplaceAllString(response.Text, "")
+		content := utils.SanitizeGeminiMarkup(imagePlaceholderRegex.ReplaceAllString(response.Text, ""))
 		content = strings.TrimSpace(content)
 		if len(response.Images) > 0 {
 			var imgMarkdowns []string

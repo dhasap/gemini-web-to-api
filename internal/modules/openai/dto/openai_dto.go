@@ -242,6 +242,17 @@ func (r ChatCompletionRequest) EffectiveReasoningEffort() string {
 	return ""
 }
 
+// HasSystemMessage reports whether the client supplied any system/developer
+// role message (in which case we do not prepend our own style contract).
+func (r ChatCompletionRequest) HasSystemMessage() bool {
+	for _, m := range r.Messages {
+		if strings.EqualFold(m.Role, "system") || strings.EqualFold(m.Role, "developer") {
+			return true
+		}
+	}
+	return false
+}
+
 func (r ChatCompletionRequest) ToModelMessages() []models.Message {
 	result := make([]models.Message, 0, len(r.Messages))
 	for _, msg := range r.Messages {
