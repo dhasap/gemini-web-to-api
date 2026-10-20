@@ -658,7 +658,7 @@ func (c *Client) generateContent(ctx context.Context, prompt string, metadata []
 		// window — further 30-45s backoffs just stall the caller (dashboards
 		// time out at 45s with "fetch failed"). Bail out early with a clear
 		// error so clients can retry later instead of hanging.
-		if attempt >= 3 && lastErr != nil && strings.Contains(lastErr.Error(), "1095") && time.Since(totalStart) < 90*time.Second {
+		if attempt >= 2 && lastErr != nil && strings.Contains(lastErr.Error(), "1095") && time.Since(totalStart) < 60*time.Second {
 			c.log.Warn("Fast-fail: account in hard throttle window",
 				zap.Int("attempt", attempt),
 				zap.Duration("elapsed", time.Since(totalStart)),
