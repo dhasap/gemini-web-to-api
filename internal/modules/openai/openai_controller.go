@@ -113,7 +113,10 @@ func (h *OpenAIController) HandleChatCompletions(c fiber.Ctx) error {
 		c.Set("X-Accel-Buffering", "no")
 
 		c.RequestCtx().SetBodyStreamWriter(func(w *bufio.Writer) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			// 12 min: agent-tool loops with large transcripts regularly run
+			// several minutes; a 5-min ceiling killed healthy mid-loop turns
+			// with "context deadline exceeded" (observed 2026-10-21).
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 			defer cancel()
 
 			err := h.service.CreateChatCompletionStream(ctx, req, func(chunk dto.ChatCompletionChunk) bool {
