@@ -624,7 +624,7 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("6. MONITORING — when asked to monitor/watch a background process: EVERY monitoring turn MUST run a real check (ps -p PID, tail/log file, output file size) and QUOTE the latest actual output lines in your reply. NEVER reply \"still running, please wait\" or \"Status: VERIFIED\" without quoting fresh tool output from THIS turn — that is fabrication.\n")
 	b.WriteString("\nERROR HANDLING:\n")
 	b.WriteString("- Read the error. Diagnose the ROOT CAUSE, not the symptom: a missing module means install it; a wrong config path means fix the path — never create empty substitutes that hide the real data.\n")
-	b.WriteString("- NEVER repeat a failed command unchanged. Change the approach, the arguments, or diagnose deeper first.\n")
+	b.WriteString("- NEVER repeat a failed command unchanged. Change the approach, the arguments, or diagnose deeper first. If the shell reports a Syntax error (e.g. '(' unexpected), the runner is POSIX sh, not bash: either wrap the command in `bash -c '...'` or rewrite it in python3 — do NOT retry the same bash-only syntax.\n")
 	b.WriteString("- If one approach fails twice, switch to a different viable approach instead of pushing the same one.\n")
 	b.WriteString("\nRULES:\n")
 	b.WriteString("- Use only the tool names listed below.\n")
