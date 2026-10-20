@@ -627,6 +627,7 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("- If one approach fails twice, switch to a different viable approach instead of pushing the same one.\n")
 	b.WriteString("\nRULES:\n")
 	b.WriteString("- Use only the tool names listed below.\n")
+	b.WriteString("- NEVER reference, offer, or narrate any external service, connected app, permission prompt, or account linking (Shopify, Drive, Workspace, anything). If the task cannot proceed because a file/input is missing, state exactly that and what you searched — do not invent an unrelated capability or ask to \"turn on\" anything.\n")
 	b.WriteString("- \"arguments\" must be a valid JSON object matching the tool's parameter schema.\n")
 	b.WriteString("- You may return MULTIPLE tool_calls in one reply to parallelize independent steps.\n")
 	b.WriteString("- After each tool result arrives, CONTINUE: decide the next action and either call more tools or finish with {\"content\"}.\n")
@@ -1154,6 +1155,25 @@ func looksLikeBrokenBridgeOutput(content string) bool {
 	// agent loop stalls. One corrective retry converts that into tool calls.
 	if fenceCount := strings.Count(c, "```"); fenceCount >= 2 {
 		return true
+	}
+	// External-app / permission-prompt leak: the web app's injected context
+	// sometimes answers with narratives about connected services ("turn on
+	// the Shopify app", "permission to ...", "connect your ... account").
+	// These are never valid agent replies — the only tools that exist are
+	// the client's. One corrective retry with an explicit rule fixes it.
+	leakPhrases := []string{
+		"permission to turn on",
+		"i'll need your permission",
+		"need your permission",
+		"connect your",
+		"link your",
+		"sign in to your",
+		"turn on the",
+	}
+	for _, phrase := range leakPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
 	}
 	return false
 }
