@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -21,15 +22,27 @@ import (
 
 var imagePlaceholderRegex = regexp.MustCompile(`(?i)https?://googleusercontent\.com/image_generation_content/\d+`)
 
+// maxToolBridgeAttempts bounds how many times Gemini is asked for a tool-bridge
+// reply before the request fails with ErrInvalidToolCall.
+const maxToolBridgeAttempts = 3
+
+// ErrInvalidToolCall reports that Gemini never produced a usable tool call.
+// Tool calls are never fabricated, so callers get an error to retry on instead
+// of a call with missing arguments.
+var ErrInvalidToolCall = errors.New("gemini did not return a valid tool call")
+
 type OpenAIService struct {
 	client *providers.Client
 	log    *zap.Logger
+	// generate sends a prompt to Gemini; tests replace it.
+	generate func(ctx context.Context, prompt string, options ...providers.GenerateOption) (*providers.Response, error)
 }
 
 func NewOpenAIService(client *providers.Client, log *zap.Logger) *OpenAIService {
 	return &OpenAIService{
-		client: client,
-		log:    log,
+		client:   client,
+		log:      log,
+		generate: client.GenerateContent,
 	}
 }
 
@@ -100,21 +113,16 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 	}
 
 	// Logic: Call Provider
-	response, err := s.client.GenerateContent(ctx, prompt, opts...)
-	if err != nil {
-		return nil, err
-	}
-
+	var response *providers.Response
 	message := dto.ChatCompletionResponseMessage{Role: "assistant"}
 	finishReason := "stop"
 
 	if req.HasToolsEnabled() {
-		toolCalls, content := s.parseToolBridgeOutput(req, response.Text)
-		if len(toolCalls) == 0 {
-			fallback := s.buildFallbackToolCalls(req)
-			if len(fallback) > 0 && (req.ToolChoiceMode() == "required" || req.ToolChoiceMode() == "function") {
-				toolCalls = fallback
-			}
+		var toolCalls []dto.ChatCompletionToolCall
+		var content string
+		response, toolCalls, content, err = s.generateToolBridge(ctx, req, prompt, opts)
+		if err != nil {
+			return nil, err
 		}
 
 		if len(toolCalls) > 0 {
@@ -124,6 +132,10 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 			message.Content = content
 		}
 	} else {
+		response, err = s.generate(ctx, prompt, opts...)
+		if err != nil {
+			return nil, err
+		}
 		content := imagePlaceholderRegex.ReplaceAllString(response.Text, "")
 		content = strings.TrimSpace(content)
 		if len(response.Images) > 0 {
@@ -484,6 +496,63 @@ type toolBridgePayload struct {
 type toolBridgeCall struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
+	// Keys Gemini sometimes uses instead of "arguments", and the nested OpenAI
+	// shape {"type":"function","function":{"name":...,"arguments":...}}.
+	Args       json.RawMessage `json:"args"`
+	Parameters json.RawMessage `json:"parameters"`
+	Input      json.RawMessage `json:"input"`
+	Function   *toolBridgeCall `json:"function"`
+}
+
+func (c toolBridgeCall) toolName() string {
+	if name := strings.TrimSpace(c.Name); name != "" || c.Function == nil {
+		return name
+	}
+	return c.Function.toolName()
+}
+
+func (c toolBridgeCall) rawArguments() json.RawMessage {
+	for _, raw := range []json.RawMessage{c.Arguments, c.Args, c.Parameters, c.Input} {
+		if len(raw) > 0 {
+			return raw
+		}
+	}
+	if c.Function != nil {
+		return c.Function.rawArguments()
+	}
+	return nil
+}
+
+// generateToolBridge asks Gemini for a tool-bridge reply and retries, with a
+// note about what was wrong, while the reply has no usable tool call. It never
+// fabricates a call: when every attempt fails it returns ErrInvalidToolCall.
+func (s *OpenAIService) generateToolBridge(ctx context.Context, req dto.ChatCompletionRequest, prompt string, opts []providers.GenerateOption) (*providers.Response, []dto.ChatCompletionToolCall, string, error) {
+	mustCall := req.ToolChoiceMode() == "required" || req.ToolChoiceMode() == "function"
+	attemptPrompt := prompt
+	var lastErr error
+	for attempt := 1; attempt <= maxToolBridgeAttempts; attempt++ {
+		response, err := s.generate(ctx, attemptPrompt, opts...)
+		if err != nil {
+			return nil, nil, "", err
+		}
+
+		calls, content, err := s.parseToolBridgeOutput(req, response.Text)
+		if err == nil && mustCall && len(calls) == 0 {
+			err = errors.New("the reply contained no tool call")
+		}
+		if err == nil {
+			return response, calls, content, nil
+		}
+
+		lastErr = err
+		s.log.Warn("Gemini returned an unusable tool call",
+			zap.Int("attempt", attempt), zap.Int("max_attempts", maxToolBridgeAttempts),
+			zap.String("model", req.Model), zap.Error(err))
+		s.log.Debug("Unusable tool bridge reply", zap.String("text", response.Text))
+		attemptPrompt = prompt + "\n\nYour previous reply could not be used: " + err.Error() +
+			". Reply again with JSON only, exactly matching the output schema above, and set every required argument."
+	}
+	return nil, nil, "", fmt.Errorf("%w after %d attempts: %v", ErrInvalidToolCall, maxToolBridgeAttempts, lastErr)
 }
 
 func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, basePrompt string) string {
@@ -491,10 +560,11 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("You are an OpenAI-compatible assistant running behind a bridge to Gemini web.\n")
 	b.WriteString("You MUST respond with JSON only. Do not output markdown code fences.\n")
 	b.WriteString("Output schema:\n")
-	b.WriteString("{\"tool_calls\":[{\"name\":\"<tool_name>\",\"arguments\":{}}]} OR {\"content\":\"<assistant_text>\"}\n")
+	b.WriteString("{\"tool_calls\":[{\"name\":\"<tool_name>\",\"arguments\":{\"<parameter>\":<value>}}]} OR {\"content\":\"<assistant_text>\"}\n")
 	b.WriteString("Rules:\n")
 	b.WriteString("- Use only tool names listed below.\n")
-	b.WriteString("- arguments must be valid JSON object.\n")
+	b.WriteString("- arguments must be a JSON object that sets every required parameter of the tool's parameters schema.\n")
+	b.WriteString("- Escape newlines and double quotes inside JSON strings as \\n and \\\".\n")
 
 	toolChoiceMode := req.ToolChoiceMode()
 	if toolChoiceMode == "required" {
@@ -535,23 +605,27 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	return b.String()
 }
 
-func (s *OpenAIService) parseToolBridgeOutput(req dto.ChatCompletionRequest, text string) ([]dto.ChatCompletionToolCall, string) {
+// parseToolBridgeOutput extracts tool calls from a tool-bridge reply. A reply
+// that is not bridge JSON is returned as plain assistant text. An error means
+// the model tried to call a tool but the call cannot be used (unknown tool,
+// malformed or incomplete arguments), so it must not reach the client.
+func (s *OpenAIService) parseToolBridgeOutput(req dto.ChatCompletionRequest, text string) ([]dto.ChatCompletionToolCall, string, error) {
 	cleaned := utils.StripCodeFence(text)
 	if cleaned == "" {
-		return nil, ""
+		return nil, "", nil
 	}
 
 	payload, ok := decodeToolBridgePayload(cleaned)
 	if !ok {
-		return nil, strings.TrimSpace(text)
+		return nil, strings.TrimSpace(text), nil
 	}
 
-	allowed := make(map[string]struct{}, len(req.Tools))
+	schemas := make(map[string]json.RawMessage, len(req.Tools))
 	for _, t := range req.Tools {
 		if strings.EqualFold(t.Type, "function") {
 			name := strings.TrimSpace(t.Function.Name)
 			if name != "" {
-				allowed[name] = struct{}{}
+				schemas[name] = t.Function.Parameters
 			}
 		}
 	}
@@ -559,17 +633,24 @@ func (s *OpenAIService) parseToolBridgeOutput(req dto.ChatCompletionRequest, tex
 	forcedName := req.ForcedToolName()
 	calls := make([]dto.ChatCompletionToolCall, 0, len(payload.ToolCalls))
 	for i, tc := range payload.ToolCalls {
-		name := strings.TrimSpace(tc.Name)
+		name := tc.toolName()
 		if name == "" {
 			continue
 		}
-		if len(allowed) > 0 {
-			if _, ok := allowed[name]; !ok {
-				continue
-			}
+		schema, known := schemas[name]
+		if len(schemas) > 0 && !known {
+			continue
 		}
 		if forcedName != "" && name != forcedName {
 			continue
+		}
+
+		args, err := normalizeArguments(tc.rawArguments())
+		if err != nil {
+			return nil, "", fmt.Errorf("tool %q: %w", name, err)
+		}
+		if err := checkRequiredArguments(schema, args); err != nil {
+			return nil, "", fmt.Errorf("tool %q: %w", name, err)
 		}
 
 		calls = append(calls, dto.ChatCompletionToolCall{
@@ -577,92 +658,133 @@ func (s *OpenAIService) parseToolBridgeOutput(req dto.ChatCompletionRequest, tex
 			Type: "function",
 			Function: dto.ChatCompletionToolCallFunction{
 				Name:      name,
-				Arguments: normalizeArguments(tc.Arguments),
+				Arguments: args,
 			},
 		})
+	}
+	if len(payload.ToolCalls) > 0 && len(calls) == 0 {
+		return nil, "", errors.New("no tool call named one of the requested tools")
 	}
 
 	content := strings.TrimSpace(payload.Content)
 	if content == "" && len(calls) == 0 {
 		content = strings.TrimSpace(text)
 	}
-	return calls, content
+	return calls, content, nil
 }
 
-func (s *OpenAIService) buildFallbackToolCalls(req dto.ChatCompletionRequest) []dto.ChatCompletionToolCall {
-	forced := req.ForcedToolName()
-	if forced != "" {
-		return []dto.ChatCompletionToolCall{
-			{
-				ID:   fmt.Sprintf("call_%d_0", time.Now().UnixNano()),
-				Type: "function",
-				Function: dto.ChatCompletionToolCallFunction{
-					Name:      forced,
-					Arguments: "{}",
-				},
-			},
-		}
-	}
-
-	if req.ToolChoiceMode() == "required" {
-		for _, t := range req.Tools {
-			if strings.EqualFold(t.Type, "function") && strings.TrimSpace(t.Function.Name) != "" {
-				return []dto.ChatCompletionToolCall{
-					{
-						ID:   fmt.Sprintf("call_%d_0", time.Now().UnixNano()),
-						Type: "function",
-						Function: dto.ChatCompletionToolCallFunction{
-							Name:      strings.TrimSpace(t.Function.Name),
-							Arguments: "{}",
-						},
-					},
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
+// decodeToolBridgePayload finds the bridge JSON in a reply. It tolerates prose
+// around the JSON (including stray braces) and raw newlines inside JSON
+// strings, which Gemini often writes for multi-line argument values.
 func decodeToolBridgePayload(text string) (toolBridgePayload, bool) {
-	var payload toolBridgePayload
-	if err := json.Unmarshal([]byte(text), &payload); err == nil {
+	if payload, ok := unmarshalToolBridgePayload(text); ok {
 		return payload, true
 	}
 
-	obj := extractFirstJSONObject(text)
-	if obj == "" {
-		return toolBridgePayload{}, false
+	for start := strings.Index(text, "{"); start >= 0; {
+		if obj := utils.ExtractFirstJSONObject(text[start:]); obj != "" {
+			if payload, ok := unmarshalToolBridgePayload(obj); ok {
+				return payload, true
+			}
+		}
+		next := strings.Index(text[start+1:], "{")
+		if next < 0 {
+			break
+		}
+		start += next + 1
 	}
-	if err := json.Unmarshal([]byte(obj), &payload); err != nil {
+	return toolBridgePayload{}, false
+}
+
+// unmarshalToolBridgePayload decodes text as bridge JSON. Objects without
+// tool_calls or content (such as a nested argument object) are rejected.
+func unmarshalToolBridgePayload(text string) (toolBridgePayload, bool) {
+	var payload toolBridgePayload
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		payload = toolBridgePayload{}
+		if err := json.Unmarshal([]byte(utils.EscapeJSONStringControlChars(text)), &payload); err != nil {
+			return toolBridgePayload{}, false
+		}
+	}
+	if len(payload.ToolCalls) == 0 && strings.TrimSpace(payload.Content) == "" {
 		return toolBridgePayload{}, false
 	}
 	return payload, true
 }
 
-func extractFirstJSONObject(text string) string {
-	return utils.ExtractFirstJSONObject(text)
-}
-
-func normalizeArguments(raw json.RawMessage) string {
+// normalizeArguments returns tool-call arguments as a compact JSON object.
+// Missing arguments mean an empty object; anything that is not a JSON object
+// is an error instead of being replaced with "{}".
+func normalizeArguments(raw json.RawMessage) (string, error) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
-		return "{}"
+		return "{}", nil
 	}
 
+	// Some replies encode the arguments as a JSON string.
 	if strings.HasPrefix(trimmed, "\"") {
 		var asString string
-		if err := json.Unmarshal(raw, &asString); err == nil {
-			trimmed = strings.TrimSpace(asString)
-			if trimmed == "" {
-				return "{}"
-			}
+		if err := json.Unmarshal([]byte(trimmed), &asString); err != nil {
+			return "", fmt.Errorf("arguments are not valid JSON: %w", err)
+		}
+		trimmed = strings.TrimSpace(asString)
+		if trimmed == "" {
+			return "{}", nil
 		}
 	}
 
+	if !strings.HasPrefix(trimmed, "{") {
+		return "", errors.New("arguments must be a JSON object")
+	}
+	if !json.Valid([]byte(trimmed)) {
+		trimmed = utils.EscapeJSONStringControlChars(trimmed)
+	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, []byte(trimmed)); err != nil {
-		return "{}"
+		return "", fmt.Errorf("arguments are not valid JSON: %w", err)
 	}
-	return compact.String()
+	return compact.String(), nil
+}
+
+// toolSchema is the part of a JSON Schema needed to find missing arguments.
+type toolSchema struct {
+	Properties map[string]toolSchema `json:"properties"`
+	Required   []string              `json:"required"`
+}
+
+// checkRequiredArguments reports the first required property that args
+// leaves out, including those of nested objects. It is not a full JSON Schema
+// validator: schemas it cannot read are not checked.
+func checkRequiredArguments(schema json.RawMessage, args string) error {
+	if len(schema) == 0 {
+		return nil
+	}
+	var parsed toolSchema
+	if err := json.Unmarshal(schema, &parsed); err != nil {
+		return nil
+	}
+	return missingRequired(parsed, json.RawMessage(args), "")
+}
+
+func missingRequired(schema toolSchema, value json.RawMessage, path string) error {
+	if len(schema.Required) == 0 && len(schema.Properties) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(value, &obj); err != nil {
+		return nil
+	}
+	for _, key := range schema.Required {
+		if _, ok := obj[key]; !ok {
+			return fmt.Errorf("missing required argument %q", path+key)
+		}
+	}
+	for key, sub := range schema.Properties {
+		if v, ok := obj[key]; ok {
+			if err := missingRequired(sub, v, path+key+"."); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

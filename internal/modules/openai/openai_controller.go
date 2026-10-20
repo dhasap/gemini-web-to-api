@@ -81,6 +81,10 @@ func openAIRequestError(c fiber.Ctx, err error) error {
 	if errors.As(err, &modelErr) {
 		return c.Status(fiber.StatusBadRequest).JSON(utils.ErrorToResponse(err, "invalid_request_error"))
 	}
+	if errors.Is(err, ErrInvalidToolCall) {
+		// Gemini answered, but not with a usable tool call; clients may retry.
+		return c.Status(fiber.StatusBadGateway).JSON(utils.ErrorToResponse(err, "api_error"))
+	}
 	return c.Status(fiber.StatusInternalServerError).JSON(utils.ErrorToResponse(err, "api_error"))
 }
 

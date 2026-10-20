@@ -35,7 +35,10 @@ func TestOpenAIToolBridgeParsing(t *testing.T) {
 
 	t.Run("parse valid tool call", func(t *testing.T) {
 		input := "```json\n{\"status\":\"tool_use\",\"tool_calls\":[{\"name\":\"get_current_weather\",\"arguments\":{\"location\":\"Hanoi\"}}]}\n```"
-		calls, content := service.parseToolBridgeOutput(req, input)
+		calls, content, err := service.parseToolBridgeOutput(req, input)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(calls) != 1 {
 			t.Fatalf("expected 1 tool call, got %d", len(calls))
 		}
@@ -49,7 +52,10 @@ func TestOpenAIToolBridgeParsing(t *testing.T) {
 
 	t.Run("parse tool call with surrounding text", func(t *testing.T) {
 		input := "I'll check the weather for Hanoi right now.\n{\"status\":\"tool_use\",\"tool_calls\":[{\"name\":\"get_current_weather\",\"arguments\":{\"location\":\"Hanoi\"}}]}\nDone."
-		calls, _ := service.parseToolBridgeOutput(req, input)
+		calls, _, err := service.parseToolBridgeOutput(req, input)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(calls) != 1 {
 			t.Fatalf("expected 1 tool call, got %d", len(calls))
 		}
@@ -60,7 +66,10 @@ func TestOpenAIToolBridgeParsing(t *testing.T) {
 
 	t.Run("parse non-tool plain text", func(t *testing.T) {
 		input := "The weather in Hanoi is nice and sunny today."
-		calls, content := service.parseToolBridgeOutput(req, input)
+		calls, content, err := service.parseToolBridgeOutput(req, input)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(calls) != 0 {
 			t.Errorf("expected 0 tool calls, got %d", len(calls))
 		}

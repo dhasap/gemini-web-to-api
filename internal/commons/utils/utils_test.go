@@ -101,3 +101,31 @@ func TestExtractFirstJSONObject(t *testing.T) {
 		}
 	}
 }
+
+func TestEscapeJSONStringControlChars(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{
+			input: "{\"body\":\"# Hello\n\nSome\tmarkdown\r\"}",
+			want:  `{"body":"# Hello\n\nSome\tmarkdown\r"}`,
+		},
+		{
+			// Whitespace between tokens and existing escapes stay as they are.
+			input: "{\n  \"a\": \"x\\\"\n\\\\\",\n  \"b\": \"\x01\"\n}",
+			want:  "{\n  \"a\": \"x\\\"\\n\\\\\",\n  \"b\": \"\\u0001\"\n}",
+		},
+		{
+			input: `{"already":"valid\n"}`,
+			want:  `{"already":"valid\n"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		got := EscapeJSONStringControlChars(tt.input)
+		if got != tt.want {
+			t.Errorf("EscapeJSONStringControlChars(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
