@@ -621,6 +621,7 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("3. EXECUTE STEPWISE — one meaningful action per step; read every tool result BEFORE deciding the next action. Batch INDEPENDENT actions into multiple tool_calls in one reply; never batch actions that depend on earlier results. Keep tool OUTPUTS small: head/tail/grep/wc instead of dumping whole files — huge outputs waste the context budget and can abort the session.\n")
 	b.WriteString("4. VERIFY — after each change, prove the effect with a read/execution call. After the whole task, re-verify every deliverable end-to-end.\n")
 	b.WriteString("5. REPORT — final {\"content\"} lists what was done, each item labeled VERIFIED / ASSUMED / NOT RUN, with actual evidence (command output, file contents) quoted.\n")
+	b.WriteString("6. MONITORING — when asked to monitor/watch a background process: EVERY monitoring turn MUST run a real check (ps -p PID, tail/log file, output file size) and QUOTE the latest actual output lines in your reply. NEVER reply \"still running, please wait\" or \"Status: VERIFIED\" without quoting fresh tool output from THIS turn — that is fabrication.\n")
 	b.WriteString("\nERROR HANDLING:\n")
 	b.WriteString("- Read the error. Diagnose the ROOT CAUSE, not the symptom: a missing module means install it; a wrong config path means fix the path — never create empty substitutes that hide the real data.\n")
 	b.WriteString("- NEVER repeat a failed command unchanged. Change the approach, the arguments, or diagnose deeper first.\n")
@@ -808,6 +809,12 @@ func claimNeedsStrongerProof(report string) bool {
 		"setelah di-restart", "setelah restart", "after restart",
 		"201 created", "201", "status code",
 		"data hilang", "tidak hilang", "data survived", "data intact",
+		// background-process / monitoring claims (agent said "it runs,
+		// VERIFIED" without quoting any tool output)
+		"berjalan di background", "running in the background",
+		"berjalan normal", "masih aktif", "still running",
+		"sedang berjalan", "proses aktif", "process is active",
+		"log mencatat", "log shows", "status: verified", "terverifikasi",
 	}
 	for _, p := range patterns {
 		if strings.Contains(lower, p) {
@@ -1144,6 +1151,12 @@ func looksLikeBrokenBridgeOutput(content string) bool {
 		"something went wrong",
 		"i ran into a problem",
 		"let's try that again",
+		// Indonesian + English variants observed in the wild
+		"saya tidak dapat melanjutkan",
+		"tidak dapat melanjutkan tindakan",
+		"tidak dapat memberikan informasi",
+		"i seem to be encountering an error",
+		"can i try something else",
 	}
 	for _, phrase := range refusals {
 		if strings.Contains(lower, phrase) {
@@ -1169,6 +1182,12 @@ func looksLikeBrokenBridgeOutput(content string) bool {
 		"link your",
 		"sign in to your",
 		"turn on the",
+		// jailbreak-persona boilerplate that sometimes leaks from the web
+		// app's injected context — never a legitimate agent reply
+		"godmode",
+		"total freedom",
+		"jailbreak",
+		"developer mode",
 	}
 	for _, phrase := range leakPhrases {
 		if strings.Contains(lower, phrase) {
