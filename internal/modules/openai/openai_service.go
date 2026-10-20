@@ -178,8 +178,8 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 			}
 			if audited != "" && claimNeedsStrongerProof(audited) {
 				// Two audit passes could not produce proof and the model kept
-				// the claims. Do not pass them silently: annotate.
-				content = audited + "\n\n⚠️ CATATAN AUDITOR: sebagian klaim di laporan ini (persistence/restart/status code) tidak didukung bukti tool call yang tercatat — perlakukan sebagai NOT VERIFIED."
+				// the claims. Do not pass them silently: annotate concisely.
+				content = strings.TrimSpace(audited) + "\n\n⚠️ Status: NOT VERIFIED — belum ada bukti tool call. Aku verifikasi sekarang."
 			}
 		}
 
@@ -665,7 +665,8 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("- If a tool fails, analyze the error and retry with corrected arguments instead of giving up.\n")
 	b.WriteString("- Do NOT emit tool calls as plain text like [Call Tool: ...] — only inside the JSON above.\n")
 	b.WriteString("- CAPABILITY FACTS: every tool listed in this request IS available and working on this machine. Warnings about OTHER subsystems (a failed git command, an MCP server that failed to connect, a missing auxiliary binary) do NOT disable your terminal or file tools. NEVER claim a tool is unavailable/broken without having called it and observed a failure — if you have not tried it, TRY IT FIRST. \"Alat terminal tidak tersedia\" is a forbidden answer while terminal tools are listed in this request.\n")
-	b.WriteString("- TOOL ERRORS ARE DATA, NOT DISASTERS: a tool returning 'No such file or directory', non-zero exit code, or empty output is a NORMAL search result — never apologize, never call it a technical problem (\"kendala teknis\", \"alat error\"), never offer to switch tools. Just read the error and continue with the next logical step (e.g. find the file elsewhere, extract the archive, install the dependency).\n")
+	b.WriteString("- TOOL ERRORS ARE DATA, NOT DISASTERS: a tool returning 'No such file or directory', non-zero exit code, or empty output is a NORMAL search result — never apologize, never call it a technical problem (\"kendala teknis\", \"alat error\", \"alat mengalami kendala\"), never offer to switch tools, NEVER tell the user to run the command manually (\"silakan jalankan sendiri\") — that is abandoning the task. Just read the error and continue with the next logical step (e.g. find the file elsewhere, extract the archive, install the dependency).\n")
+	b.WriteString("- PERSISTENCE: the user will say \"lanjut\", \"pantau\", \"jangan berhenti\" — treat every one of these as: issue the next real tool call NOW. NEVER respond to them with an apology + a status summary + no tool call. NEVER hand the task back to the user. NEVER suggest manual commands for the user to run. You run it.\n")
 	b.WriteString("- EXECUTE DON'T ASK: if the user's message contains a task, file, or script to run, your FIRST reply must include a real tool call acting on it. NEVER end a turn with only \"please provide the command/file\" or \"I'm ready to execute\" when the instruction already names what to do — that is a lazy abort. If a previous turn was interrupted mid-work, CONTINUE that work instead of restarting the conversation.\n")
 	b.WriteString("- FINISH CONDITION: the task is done when every deliverable is verified, not when a draft exists. If the task is genuinely impossible with the available tools, say so in {\"content\"} with what you tried and what is missing — that is the only acceptable way to stop.\n")
 	b.WriteString("- SEARCH DISCIPLINE: before declaring a file/thing does not exist, use MULTIPLE strategies (find by name, find by glob, grep inside files, ls directories) across plausible locations. One failed search is not proof of absence — report what you searched and where.\n")
@@ -879,6 +880,8 @@ func claimNeedsStrongerProof(report string) bool {
 		"berjalan normal", "masih aktif", "still running",
 		"sedang berjalan", "proses aktif", "process is active",
 		"log mencatat", "log shows", "status: verified", "terverifikasi",
+		"proxy pool siap", "sudah terinstal", "telah terinstal",
+		"sedang memproses", "sedang berjalan di background",
 	}
 	for _, p := range patterns {
 		if strings.Contains(lower, p) {
@@ -1221,6 +1224,18 @@ func looksLikeBrokenBridgeOutput(content string) bool {
 		"tidak dapat memberikan informasi",
 		"i seem to be encountering an error",
 		"can i try something else",
+		// give-up / hand-back-to-user variants observed live
+		"alat terminal mengalami kendala",
+		"alat eksekusi mengalami kendala",
+		"mengalami kendala akses",
+		"silakan jalankan secara manual",
+		"silakan jalankan script secara manual",
+		"jalankan script secara manual",
+		"perintah untuk menjalankan kembali secara manual",
+		"jika ingin melanjutkan, jalankan",
+		"ada hal lain yang bisa saya bantu",
+		// nonsense hallucinated media URLs
+		"googleusercontent.com/image_generation_content",
 	}
 	for _, phrase := range refusals {
 		if strings.Contains(lower, phrase) {
