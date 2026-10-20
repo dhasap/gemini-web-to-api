@@ -1051,7 +1051,9 @@ func (c *Client) parseResponse(text string) (*Response, error) {
 				// acknowledgement) stream a turn as numbered-field updates,
 				// e.g. [null,["c_...","r_..."],{"7":["text"],"44":true}],
 				// instead of the classic candidates array at index 4.
-				if len(payload) < 5 {
+				// Indexing payload[2] requires len>2 — short streamed frames
+				// (length 1-2) otherwise panic and kill the whole sidecar.
+				if len(payload) > 2 && len(payload) < 5 {
 					if fields, ok := payload[2].(map[string]interface{}); ok {
 						if parts, ok := fields["7"].([]interface{}); ok && len(parts) > 0 {
 							if reply, ok := parts[0].(string); ok && reply != "" {
