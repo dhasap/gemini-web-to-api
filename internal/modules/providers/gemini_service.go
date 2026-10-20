@@ -653,6 +653,19 @@ func (c *Client) generateContent(ctx context.Context, prompt string, metadata []
 			}
 		}
 
+		// FAST-FAIL: two consecutive 1095 rejections with no success and no
+		// real wait between them means the account is in a hard throttle
+		// window — further 30-45s backoffs just stall the caller (dashboards
+		// time out at 45s with "fetch failed"). Bail out early with a clear
+		// error so clients can retry later instead of hanging.
+		if attempt >= 3 && lastErr != nil && strings.Contains(lastErr.Error(), "1095") && time.Since(totalStart) < 90*time.Second {
+			c.log.Warn("Fast-fail: account in hard throttle window",
+				zap.Int("attempt", attempt),
+				zap.Duration("elapsed", time.Since(totalStart)),
+			)
+			return nil, fmt.Errorf("Gemini Web account is heavily rate-limited (BardErrorInfo 1095). Wait 5-15 minutes before retrying; consider a different account/session")
+		}
+
 		httpStart := time.Now()
 
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", generateURL, strings.NewReader(formBody))
