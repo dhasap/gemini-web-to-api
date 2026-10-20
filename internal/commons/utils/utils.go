@@ -302,18 +302,30 @@ var (
 	geminiSectionTags = regexp.MustCompile(`(?s)</?(Section|TextBox|Chip|ListItem|Carousel|Card|Accordion|Table|Button|ImageUrl|IMageUrl|ListItemTitle|List|MenuItem|Preview|Score|Subtitle|Title|Video|Audio|HtmlRender|Edits\b)[^>]*>?`)
 	geminiEventFence  = regexp.MustCompile("(?m)^```([a-z]+)\\?[^`\\n]*```")
 	geminiEventFence2 = regexp.MustCompile("(?m)^```([a-z]+)\\?[^\\n]*$")
+	// decorative image badges injected by the web app (code icon etc.)
+	geminiBadgeImage = regexp.MustCompile(`!\[[^\]]*\]\(https://drive-thirdparty\.googleusercontent\.com/[^)]*\)\s*`)
+	// ```text fenced blocks unwrap to their content (answer duplication junk)
+	geminiTextFence = regexp.MustCompile("(?s)```text\n(.*?)\n```")
 )
 
 // SanitizeGeminiMarkup removes Gemini Web UI artifacts and normalizes
 // code-event fences ("```python?code_reference&code_event_index=1") into
 // plain markdown fences so clients receive clean text.
 func SanitizeGeminiMarkup(text string) string {
-	if text == "" || !strings.ContainsAny(text, "<`") {
+	if text == "" || (!strings.ContainsAny(text, "<`") && !strings.Contains(text, "drive-thirdparty")) {
 		return text
 	}
 	out := geminiSectionTags.ReplaceAllString(text, "")
 	out = geminiEventFence.ReplaceAllString(out, "```$1")
 	out = geminiEventFence2.ReplaceAllString(out, "```$1")
+	// Google Web app injects decorative image badges (e.g. a code icon) as
+	// markdown images pointing at drive-thirdparty.googleusercontent.com —
+	// meaningless in an API reply. Strip the whole image markdown.
+	out = geminiBadgeImage.ReplaceAllString(out, "")
+	// Pseudo-fence pairs: the web model wraps trivial computations as
+	// ```lang\n<code>\n``` followed by ```text\n<answer>\n```. The ```text
+	// block duplicates the answer in plain prose below; unwrap it.
+	out = geminiTextFence.ReplaceAllString(out, "$1")
 	// collapse >2 consecutive blank lines left by removed tags
 	out = regexp.MustCompile(`\n{3,}`).ReplaceAllString(out, "\n\n")
 	return strings.TrimSpace(out)

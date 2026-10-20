@@ -1199,6 +1199,14 @@ func extractBardError(item []interface{}) string {
 	return ""
 }
 
+
+// isBadgeURL reports decorative web-app badge images (code/result icons) that
+// must never surface as API "generated images" — they get re-appended to
+// content as ![image](...) markdown otherwise.
+func isBadgeURL(u string) bool {
+	return strings.Contains(u, "drive-thirdparty.googleusercontent.com")
+}
+
 func collectImages(value any, out map[string]Image) {
 	switch v := value.(type) {
 	case []interface{}:
@@ -1212,7 +1220,7 @@ func collectImages(value any, out map[string]Image) {
 	case string:
 		for _, rawURL := range imageURLRegex.FindAllString(v, -1) {
 			imageURL := normalizeImageURL(rawURL)
-			if imageURL == "" {
+			if imageURL == "" || isBadgeURL(imageURL) {
 				continue
 			}
 			if _, exists := out[imageURL]; exists {
@@ -1263,7 +1271,7 @@ func extractGeneratedImages(candidate []interface{}) []Image {
 			continue
 		}
 		imageURL, ok := metadata[3].(string)
-		if !ok || normalizeImageURL(imageURL) == "" {
+		if !ok || normalizeImageURL(imageURL) == "" || isBadgeURL(imageURL) {
 			continue
 		}
 		image := Image{URL: normalizeImageURL(imageURL), MimeType: "image/png", Generated: true}
