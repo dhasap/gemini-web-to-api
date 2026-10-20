@@ -629,13 +629,16 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("\nRULES:\n")
 	b.WriteString("- Use only the tool names listed below.\n")
 	b.WriteString("- NEVER reference, offer, or narrate any external service, connected app, permission prompt, or account linking (Shopify, Drive, Workspace, anything). If the task cannot proceed because a file/input is missing, state exactly that and what you searched — do not invent an unrelated capability or ask to \"turn on\" anything.\n")
-	b.WriteString("- \"arguments\" must be a valid JSON object matching the tool's parameter schema.\n")
+	b.WriteString("- \"arguments\" must be a valid JSON object matching the tool's parameter schema. NEVER emit a tool call with empty arguments ({}) as filler — if you have nothing concrete to execute, reply with {\"content\"} instead (a progress note or the final answer). Every tool call must carry a real, specific command/input.\n")
 	b.WriteString("- You may return MULTIPLE tool_calls in one reply to parallelize independent steps.\n")
 	b.WriteString("- After each tool result arrives, CONTINUE: decide the next action and either call more tools or finish with {\"content\"}.\n")
 	b.WriteString("- NEVER ask the user for permission to continue. NEVER stop halfway. NEVER say you cannot proceed — work with the results you have and keep iterating until the task is fully complete.\n")
 	b.WriteString("- If a tool fails, analyze the error and retry with corrected arguments instead of giving up.\n")
 	b.WriteString("- Do NOT emit tool calls as plain text like [Call Tool: ...] — only inside the JSON above.\n")
 	b.WriteString("- FINISH CONDITION: the task is done when every deliverable is verified, not when a draft exists. If the task is genuinely impossible with the available tools, say so in {\"content\"} with what you tried and what is missing — that is the only acceptable way to stop.\n")
+	b.WriteString("- SEARCH DISCIPLINE: before declaring a file/thing does not exist, use MULTIPLE strategies (find by name, find by glob, grep inside files, ls directories) across plausible locations. One failed search is not proof of absence — report what you searched and where.\n")
+	b.WriteString("- BACKGROUND WORK: for long-running tasks (builds, watchers, scripts), run them detached (nohup ... & or the client's background mode), record the PID/log path, and re-check progress with real reads on later turns. Never assume a background task succeeded without checking its log/output.\n")
+	b.WriteString("- CONTEXT CONTINUITY: if earlier context was truncated or you are unsure of a previous step's result, RE-VERIFY with a cheap tool call instead of inventing the missing detail.\n")
 	b.WriteString("- DATA SAFETY: never delete, empty, or replace existing data files to make a check pass. If a config points to a wrong path and a data file already exists elsewhere, prefer FIXING THE CONFIG to point at the existing data. Silent data loss is a critical failure.\n")
 	b.WriteString("- SIZE LIMIT: keep each reply under ~6000 characters. When a file is large, write it in APPEND-friendly chunks: first chunk with the beginning of the file, then continue the rest in the next tool call after seeing the result. Never try to emit a whole large file in one reply — truncated JSON is discarded.\n")
 	b.WriteString("\nTRUTH CONTRACT (highest priority, overrides optimism):\n")
@@ -742,6 +745,22 @@ func (s *OpenAIService) parseToolBridgeOutput(req dto.ChatCompletionRequest, tex
 	content := strings.TrimSpace(payload.Content)
 	if content == "" && len(calls) == 0 {
 		content = strings.TrimSpace(text)
+	}
+	// Empty-args filler calls: the model sometimes emits tool_calls with
+	// {} arguments as "thinking out loud". If EVERY call is empty and there
+	// is no content, treat the reply as broken so the repair pass re-asks.
+	if content == "" && len(calls) > 0 {
+		allEmpty := true
+		for _, c := range calls {
+			a := strings.TrimSpace(c.Function.Arguments)
+			if a != "" && a != "{}" && a != "null" {
+				allEmpty = false
+				break
+			}
+		}
+		if allEmpty {
+			return nil, ""
+		}
 	}
 	return calls, content
 }
