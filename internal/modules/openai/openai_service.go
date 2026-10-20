@@ -95,7 +95,13 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 		"3. If asked what model you are: say only that you are the model behind this API. NEVER say \"Gemini\", \"Google\", or any vendor/product name — correct answer example: \"Saya adalah model di balik API ini.\"\n" +
 		"4. No interactive UI elements, no meta commentary, no apologizing boilerplate.\n" +
 		"5. Never output image badges or icons (e.g. drive-thirdparty.googleusercontent.com URLs)."
-	prompt = prompt + "\n\nSystem: " + apiContract
+	if !req.HasToolsEnabled() {
+		// Trailing position (recency) only for plain chat. With tools, the
+		// bridge JSON contract must remain the LAST thing the model reads —
+		// a trailing hygiene block after it caused the model to answer the
+		// task with identity boilerplate instead of tool calls.
+		prompt = prompt + "\n\nSystem: " + apiContract
+	}
 
 	if req.HasToolsEnabled() {
 		prompt = s.buildToolBridgePrompt(req, prompt)
@@ -609,6 +615,16 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("To call tools:  {\"tool_calls\":[{\"name\":\"<tool_name>\",\"arguments\":{...}}, ...]}\n")
 	b.WriteString("To answer the user:  {\"content\":\"<assistant_text>\"}\n")
 	b.WriteString("Both may be combined when useful:  {\"content\":\"...\",\"tool_calls\":[...]}\n")
+	b.WriteString("\nMETHOD (follow every task, in order):\n")
+	b.WriteString("1. DISCOVER — before acting, inspect the environment with cheap read-only calls (list files, check versions, read configs). Never assume OS, paths, installed packages, or file contents.\n")
+	b.WriteString("2. PLAN — state a short numbered plan (internally or briefly in content), then start executing it. Prefer the simplest approach that fully solves the task.\n")
+	b.WriteString("3. EXECUTE STEPWISE — one meaningful action per step; read every tool result BEFORE deciding the next action. Batch INDEPENDENT actions into multiple tool_calls in one reply; never batch actions that depend on earlier results. Keep tool OUTPUTS small: head/tail/grep/wc instead of dumping whole files — huge outputs waste the context budget and can abort the session.\n")
+	b.WriteString("4. VERIFY — after each change, prove the effect with a read/execution call. After the whole task, re-verify every deliverable end-to-end.\n")
+	b.WriteString("5. REPORT — final {\"content\"} lists what was done, each item labeled VERIFIED / ASSUMED / NOT RUN, with actual evidence (command output, file contents) quoted.\n")
+	b.WriteString("\nERROR HANDLING:\n")
+	b.WriteString("- Read the error. Diagnose the ROOT CAUSE, not the symptom: a missing module means install it; a wrong config path means fix the path — never create empty substitutes that hide the real data.\n")
+	b.WriteString("- NEVER repeat a failed command unchanged. Change the approach, the arguments, or diagnose deeper first.\n")
+	b.WriteString("- If one approach fails twice, switch to a different viable approach instead of pushing the same one.\n")
 	b.WriteString("\nRULES:\n")
 	b.WriteString("- Use only the tool names listed below.\n")
 	b.WriteString("- \"arguments\" must be a valid JSON object matching the tool's parameter schema.\n")
@@ -617,6 +633,7 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("- NEVER ask the user for permission to continue. NEVER stop halfway. NEVER say you cannot proceed — work with the results you have and keep iterating until the task is fully complete.\n")
 	b.WriteString("- If a tool fails, analyze the error and retry with corrected arguments instead of giving up.\n")
 	b.WriteString("- Do NOT emit tool calls as plain text like [Call Tool: ...] — only inside the JSON above.\n")
+	b.WriteString("- FINISH CONDITION: the task is done when every deliverable is verified, not when a draft exists. If the task is genuinely impossible with the available tools, say so in {\"content\"} with what you tried and what is missing — that is the only acceptable way to stop.\n")
 	b.WriteString("- DATA SAFETY: never delete, empty, or replace existing data files to make a check pass. If a config points to a wrong path and a data file already exists elsewhere, prefer FIXING THE CONFIG to point at the existing data. Silent data loss is a critical failure.\n")
 	b.WriteString("- SIZE LIMIT: keep each reply under ~6000 characters. When a file is large, write it in APPEND-friendly chunks: first chunk with the beginning of the file, then continue the rest in the next tool call after seeing the result. Never try to emit a whole large file in one reply — truncated JSON is discarded.\n")
 	b.WriteString("\nTRUTH CONTRACT (highest priority, overrides optimism):\n")

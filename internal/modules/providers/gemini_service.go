@@ -620,12 +620,29 @@ func (c *Client) generateContent(ctx context.Context, prompt string, metadata []
 	totalStart := time.Now()
 
 	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	// Rate-limit rejections (BardErrorInfo 8/1095) need far longer cooldowns
+	// than transient errors — short retries just burn attempts while the
+	// upstream limit is still hot (agent loops fire turns seconds apart).
+	effectiveMax := maxAttempts
+	for attempt := 1; attempt <= effectiveMax; attempt++ {
 		if attempt > 1 {
 			backoff := time.Duration(1<<uint(attempt-2)) * time.Second
+			rateLimited := lastErr != nil && strings.Contains(lastErr.Error(), "1095")
+			if rateLimited {
+				effectiveMax = maxAttempts + 2
+				// Upstream throttles on a ~per-minute window; 8s backoffs all
+				// land inside the same window and burn attempts. Step 30/45s.
+				minBackoff := 30 * time.Second
+				if attempt > 2 {
+					minBackoff = 45 * time.Second
+				}
+				if backoff < minBackoff {
+					backoff = minBackoff
+				}
+			}
 			c.log.Warn("Retrying GenerateContent",
 				zap.Int("attempt", attempt),
-				zap.Int("max_attempts", maxAttempts),
+				zap.Int("max_attempts", effectiveMax),
 				zap.Duration("backoff", backoff),
 				zap.Error(lastErr),
 			)

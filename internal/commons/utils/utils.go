@@ -33,6 +33,13 @@ func BuildPromptFromMessages(messages []models.Message, systemPrompt string) str
 		if strings.TrimSpace(content) == "" && len(msg.Attachments) > 0 {
 			content = fmt.Sprintf("[%d file(s) attached]", len(msg.Attachments))
 		}
+		// Long tool results are the main driver of runaway prompt growth in
+		// agent loops (upstream then rejects with BardErrorInfo 1095). Keep
+		// head+tail of oversized ones; the agent can re-run a targeted
+		// command when it needs the middle.
+		if strings.EqualFold(msg.Role, "tool") && len(content) > 1500 {
+			content = content[:900] + "\n...[tool result truncated, " + fmt.Sprint(len(content)-1200) + " chars omitted — re-run a narrower command if you need the middle]...\n" + content[len(content)-300:]
+		}
 		promptBuilder.WriteString(fmt.Sprintf("%s: %s\n", role, content))
 	}
 
