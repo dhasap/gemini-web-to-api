@@ -658,7 +658,7 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("\nRULES:\n")
 	b.WriteString("- Use only the tool names listed below.\n")
 	b.WriteString("- NEVER reference, offer, or narrate any external service, connected app, permission prompt, or account linking (Shopify, Drive, Workspace, anything). If the task cannot proceed because a file/input is missing, state exactly that and what you searched — do not invent an unrelated capability or ask to \"turn on\" anything.\n")
-	b.WriteString("- \"arguments\" must be a valid JSON object matching the tool's parameter schema. NEVER emit a tool call with empty arguments ({}) as filler — if you have nothing concrete to execute, reply with {\"content\"} instead (a progress note or the final answer). Every tool call must carry a real, specific command/input.\n")
+	b.WriteString("- \"arguments\" must be a valid JSON object matching the tool's parameter schema. Values must be RAW data: plain URLs (never markdown like [url](url)), plain paths, plain commands — no markdown decoration (**bold**, `code`, [links]). NEVER emit a tool call with empty arguments ({}) as filler — if you have nothing concrete to execute, reply with {\"content\"} instead (a progress note or the final answer). Every tool call must carry a real, specific command/input.\n")
 	b.WriteString("- You may return MULTIPLE tool_calls in one reply to parallelize independent steps.\n")
 	b.WriteString("- After each tool result arrives, CONTINUE: decide the next action and either call more tools or finish with {\"content\"}.\n")
 	b.WriteString("- NEVER ask the user for permission to continue. NEVER stop halfway. NEVER say you cannot proceed — work with the results you have and keep iterating until the task is fully complete.\n")
@@ -1161,6 +1161,37 @@ func extractFirstJSONObject(text string) string {
 	return utils.ExtractFirstJSONObject(text)
 }
 
+// stripMarkdownInStrings removes markdown link wrapping inside a JSON
+// arguments string: the web model sometimes emits URLs as
+// "[https://x](https://x)" or wraps values in **bold**/**code** — tool
+// runners then fail on the decorated value and the agent gives up.
+var mdLinkRe = regexp.MustCompile(`\[[^\]]*\]\((https?://[^)\s]+)\)`)
+var mdDecorRe = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+
+func cleanArgumentStrings(obj map[string]interface{}) {
+	for k, v := range obj {
+		switch val := v.(type) {
+		case string:
+			s := mdLinkRe.ReplaceAllString(val, "$1")
+			s = mdDecorRe.ReplaceAllString(s, "$1")
+			s = strings.ReplaceAll(s, "`", "")
+			obj[k] = strings.TrimSpace(s)
+		case map[string]interface{}:
+			cleanArgumentStrings(val)
+		case []interface{}:
+			for i, e := range val {
+				if m, ok := e.(map[string]interface{}); ok {
+					cleanArgumentStrings(m)
+				} else if s, ok := e.(string); ok {
+					t := mdLinkRe.ReplaceAllString(s, "$1")
+					t = mdDecorRe.ReplaceAllString(t, "$1")
+					val[i] = strings.TrimSpace(t)
+				}
+			}
+		}
+	}
+}
+
 func normalizeArguments(raw json.RawMessage) string {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
@@ -1180,6 +1211,14 @@ func normalizeArguments(raw json.RawMessage) string {
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, []byte(trimmed)); err != nil {
 		return "{}"
+	}
+	// Clean markdown decoration from argument values.
+	var obj map[string]interface{}
+	if err := json.Unmarshal(compact.Bytes(), &obj); err == nil && obj != nil {
+		cleanArgumentStrings(obj)
+		if cleaned, err := json.Marshal(obj); err == nil {
+			return string(cleaned)
+		}
 	}
 	return compact.String()
 }
