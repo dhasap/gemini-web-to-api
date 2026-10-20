@@ -134,15 +134,37 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 				"2. For each, check whether an actual tool result in this conversation proves it. If ANY claim lacks proof, do NOT rewrite the report in prose — instead return {\"tool_calls\":[...]} with the verification commands (ls/cat/run test) needed to prove them.\n" +
 				"3. Only if every claim is already proven by tool results, return {\"content\":\"<same report, with unproven items marked NOT VERIFIED>\"}.\n" +
 				"Report to audit:\n" + content
-			if gateResp, gateErr := s.client.GenerateContent(ctx, gatePrompt, opts...); gateErr == nil {
+			audited := ""
+			for gateRound := 0; gateRound < 2; gateRound++ {
+				thisPrompt := gatePrompt
+				if gateRound == 1 {
+					// Round 2: the previous audit reply still contains strong
+					// claims (persistence/restart/status codes) that were never
+					// demonstrated in the conversation. Demand the proof runs.
+					thisPrompt = gatePrompt + "\n\nSECOND AUDIT PASS: Your audited report STILL claims outcomes (restart persistence, HTTP status codes, data survival) that no tool result in this conversation demonstrates. This is fabrication. You MUST now return {\"tool_calls\":[...]} running the exact commands that prove each remaining claim (e.g. restart the service, re-read the data file, curl the endpoint). Do not return prose."
+				}
+				gateResp, gateErr := s.client.GenerateContent(ctx, thisPrompt, opts...)
+				if gateErr != nil {
+					break
+				}
 				gateText := utils.SanitizeGeminiMarkup(gateResp.Text)
 				if gc, gcontent := s.parseToolBridgeOutput(req, gateText); len(gc) > 0 {
 					// model wants to actually verify — let the loop continue
 					toolCalls = gc
 					content = ""
+					break
 				} else if gcontent != "" && !looksLikeBrokenBridgeOutput(gcontent) {
 					content = gcontent
+					audited = gcontent
+					if !claimNeedsStrongerProof(gcontent) {
+						break
+					}
 				}
+			}
+			if audited != "" && claimNeedsStrongerProof(audited) {
+				// Two audit passes could not produce proof and the model kept
+				// the claims. Do not pass them silently: annotate.
+				content = audited + "\n\n⚠️ CATATAN AUDITOR: sebagian klaim di laporan ini (persistence/restart/status code) tidak didukung bukti tool call yang tercatat — perlakukan sebagai NOT VERIFIED."
 			}
 		}
 
@@ -587,6 +609,7 @@ func (s *OpenAIService) buildToolBridgePrompt(req dto.ChatCompletionRequest, bas
 	b.WriteString("- NEVER ask the user for permission to continue. NEVER stop halfway. NEVER say you cannot proceed — work with the results you have and keep iterating until the task is fully complete.\n")
 	b.WriteString("- If a tool fails, analyze the error and retry with corrected arguments instead of giving up.\n")
 	b.WriteString("- Do NOT emit tool calls as plain text like [Call Tool: ...] — only inside the JSON above.\n")
+	b.WriteString("- DATA SAFETY: never delete, empty, or replace existing data files to make a check pass. If a config points to a wrong path and a data file already exists elsewhere, prefer FIXING THE CONFIG to point at the existing data. Silent data loss is a critical failure.\n")
 	b.WriteString("- SIZE LIMIT: keep each reply under ~6000 characters. When a file is large, write it in APPEND-friendly chunks: first chunk with the beginning of the file, then continue the rest in the next tool call after seeing the result. Never try to emit a whole large file in one reply — truncated JSON is discarded.\n")
 	b.WriteString("\nTRUTH CONTRACT (highest priority, overrides optimism):\n")
 	b.WriteString("- NEVER claim a result, test, or artifact exists unless a tool result in this conversation PROVES it. No proof = report it as NOT VERIFIED.\n")
@@ -745,6 +768,25 @@ func allowedName(allowed map[string]struct{}, name string) bool {
 	}
 	if len(allowed) == 0 {
 		return name != ""
+	}
+	return false
+}
+
+// claimNeedsStrongerProof reports whether a report still contains strong
+// operational claims (restart persistence, HTTP status codes, data survival)
+// that demand demonstrated tool evidence before being delivered.
+func claimNeedsStrongerProof(report string) bool {
+	lower := strings.ToLower(report)
+	patterns := []string{
+		"tetap tersimpan", "tetap ada", "persisten", "persistence",
+		"setelah di-restart", "setelah restart", "after restart",
+		"201 created", "201", "status code",
+		"data hilang", "tidak hilang", "data survived", "data intact",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
 	}
 	return false
 }

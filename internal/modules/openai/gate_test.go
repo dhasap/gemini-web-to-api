@@ -18,3 +18,15 @@ func TestConversationHadToolResults(t *testing.T) {
 		t.Fatal("tool result expected")
 	}
 }
+
+func TestClaimNeedsStrongerProof(t *testing.T) {
+	if !claimNeedsStrongerProof("Setelah di-restart dan diverifikasi ulang, data tetap tersimpan dengan baik.") {
+		t.Fatal("persistence claim should require proof")
+	}
+	if !claimNeedsStrongerProof("POST Payment: Berhasil 201 Created") {
+		t.Fatal("status code claim should require proof")
+	}
+	if claimNeedsStrongerProof("File calc.py berisi implementasi kalkulator sederhana.") {
+		t.Fatal("ordinary claim should not require proof")
+	}
+}
