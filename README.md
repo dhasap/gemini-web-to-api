@@ -162,7 +162,7 @@ Pick whichever method suits your setup:
 ```bash
 curl -X POST http://localhost:4981/openai/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "gemini-advanced", "messages": [{"role": "user", "content": "Hello!"}]}'
+  -d '{"model": "gemini-auto", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
 Your Gemini Web To API is running at `http://localhost:4981` 🎉
@@ -180,7 +180,7 @@ Your Gemini Web To API is running at `http://localhost:4981` 🎉
 - 🖼️ **Image Generation**: OpenAI-compatible text-to-image with authenticated `b64_json` output
 - 🧩 **Image Inputs**: Remote URLs, `data:` URLs and multiple reference images in chat requests
 - 🎬 **Video Generation**: Text-to-video (16:9 or 9:16 MP4) via Gemini Web's Videos tool, usable from the OpenAI (`client.videos`) and Google GenAI (`generate_videos`) SDKs
-- 🧾 **Canvas**: Gemini Canvas code files and documents via any chat API — just use a `-canvas` model (e.g. `gemini-pro-canvas`)
+- 🧾 **Canvas**: Gemini Canvas code files and documents via any chat API — just use a `-canvas` model (e.g. `gemini-auto-canvas`)
 - 🎵 **Music Generation**: Gemini Web's music tool through `client.audio.speech` (OpenAI) and `-music` models (Gemini)
 
 See [Image generation and image inputs](docs/image-generation.md) for tested examples, limitations and security guidance.
@@ -245,6 +245,16 @@ by Gemini remain aliases, and `gemini-advanced` is retained as a compatibility
 alias for the discovered Pro category. An unavailable or unknown name returns
 an error instead of silently selecting another model.
 
+Many accounts now get Gemini Web's **Auto** picker. These accounts list only
+`gemini-auto`: there is no separate Pro, Flash or Thinking model to select,
+because Gemini chooses the model for each request and uses Pro only when the
+account is allowed it. Use `gemini-auto` for every endpoint (and
+`gemini-auto-canvas` / `gemini-auto-music` for Canvas and music). On the OpenAI
+API, set `reasoning_effort` to `low`, `medium` or `high` to choose the thinking
+level. `gemini-pro` and `gemini-advanced` return HTTP 400 on these accounts, and
+the error message says to use `gemini-auto`. The examples in this README use
+`gemini-auto`. If your account lists Pro, you can use `gemini-pro` instead.
+
 Model names are not seeded locally. When Google adds, removes, or renames a model, use the names returned by this endpoint instead of relying on old Gemini API version names.
 
 The `model` field in a completion response contains the resolved versioned
@@ -288,7 +298,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gemini-advanced",
+    model="gemini-auto",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 print(response.choices[0].message.content)
@@ -301,7 +311,7 @@ from langchain_anthropic import ChatAnthropic
 
 llm = ChatAnthropic(
     base_url="http://localhost:4981/claude",
-    model="gemini-advanced",
+    model="gemini-auto",
     api_key="not-needed"
 )
 
@@ -323,7 +333,7 @@ client = genai.Client(
 )
 
 response = client.models.generate_content(
-    model="gemini-advanced",
+    model="gemini-auto",
     contents="Write a poem about coding",
 )
 print(response.text)
@@ -339,7 +349,7 @@ SDK's `alt=sse` transport.
 curl -X POST http://localhost:4981/openai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-advanced",
+    "model": "gemini-auto",
     "messages": [{"role": "user", "content": "What is AI?"}],
     "stream": false
   }'

@@ -165,6 +165,25 @@ func TestParseGeminiModelsRejectsInvalidModelNumbers(t *testing.T) {
 	}
 }
 
+func TestParseGeminiModelsReportsSkippedEntries(t *testing.T) {
+	auto := modelRPCEntry("auto-id", "", "Auto", nil)
+	pro := modelRPCEntry("pro-id", "Pro", "Gemini 3.1 Pro", "3")
+	fixture := modelRPCFixture(t, 1000, nil, nil, auto, pro, auto)
+	models, skipped, err := parseGeminiModelsReport([]byte(fixture))
+	if err != nil || len(models) != 1 || models[0].ID != "gemini-auto" {
+		t.Fatalf("models=%#v, err=%v; want only gemini-auto", models, err)
+	}
+	if len(skipped) != 2 || !strings.HasPrefix(skipped[0], "invalid model number: ") ||
+		!strings.Contains(skipped[0], `"pro-id"`) || !strings.HasPrefix(skipped[1], "duplicate model ID: ") {
+		t.Fatalf("skipped entries not reported: %q", skipped)
+	}
+
+	_, _, err = parseGeminiModelsReport([]byte(modelRPCFixture(t, 1000, nil, nil, pro)))
+	if err == nil || !strings.Contains(err.Error(), `"pro-id"`) {
+		t.Fatalf("error must show the skipped entries, got %v", err)
+	}
+}
+
 func TestResolveGeminiModelNeverFallsBackFromPro(t *testing.T) {
 	models, err := parseGeminiModels([]byte(modelRPCFixture(t, 1000, nil, nil,
 		modelRPCEntry("flash-id", "Fast", "Gemini 3.8 Flash", 1))))
@@ -183,6 +202,35 @@ func TestResolveGeminiModelNeverFallsBackFromPro(t *testing.T) {
 	}
 	if _, err := resolveGeminiModel("", nil); err == nil {
 		t.Fatal("empty registry must fail closed")
+	}
+}
+
+func TestResolveGeminiModelExplainsAutoOnlyAccounts(t *testing.T) {
+	// Shape of the "Auto" entry returned to accounts on Gemini Web's Auto picker
+	// (October 2026): one entry whose field 6 lists the models Gemini routes to.
+	auto := modelRPCEntry("cf41b0e0dd7d53e5", "Auto", "Auto", 6)
+	auto[2], auto[6], auto[12], auto[19] = "Gemini 3 models", []any{"1bc6b5d98741cd3d", "1a43ad63cc8a7f9a"}, "Gemini 3 models", "Auto"
+	models, err := parseGeminiModels([]byte(modelRPCFixture(t, nil, []any{17, 38}, nil, auto)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []string{"", "gemini-auto", "Auto"} {
+		if model, err := resolveGeminiModel(request, models); err != nil || model.ModelID != "cf41b0e0dd7d53e5" || model.ModelNumber != 6 {
+			t.Errorf("resolve %q: model=%#v, err=%v", request, model, err)
+		}
+	}
+	for _, request := range []string{"gemini-pro", "gemini-advanced"} {
+		_, err := resolveGeminiModel(request, models)
+		var selectionErr *ModelSelectionError
+		if !errors.As(err, &selectionErr) || !strings.Contains(err.Error(), "available models: gemini-auto") ||
+			!strings.Contains(err.Error(), "request gemini-auto") || !strings.Contains(err.Error(), "reasoning_effort") {
+			t.Errorf("%q must fail with a hint to use gemini-auto, got %v", request, err)
+		}
+	}
+
+	_, err = resolveGeminiModel("gemini-ultra", []geminiModel{{ModelInfo: ModelInfo{ID: "gemini-pro"}, ModelID: "pro"}})
+	if err == nil || strings.Contains(err.Error(), "gemini-auto") {
+		t.Fatalf("accounts without Auto must not be pointed to it, got %v", err)
 	}
 }
 
@@ -287,7 +335,7 @@ func TestFetchGeminiModelsSendsAuthenticatedRPC(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(fixture)), Header: make(http.Header)}, nil
 	})}
-	models, err := fetchGeminiModels(context.Background(), client, "secret-token", "__Secure-1PSID=secret-cookie", "build-label", "session-id", "vi", "client-session-id", "")
+	models, _, err := fetchGeminiModels(context.Background(), client, "secret-token", "__Secure-1PSID=secret-cookie", "build-label", "session-id", "vi", "client-session-id", "")
 	if err != nil || len(models) != 1 || models[0].ModelID != "account-pro" {
 		t.Fatalf("fetch models=%#v, error=%v", models, err)
 	}
@@ -304,7 +352,7 @@ func TestFetchGeminiModelsUsesConfiguredAccountSlot(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture)), Header: make(http.Header)}, nil
 	})}
-	models, err := fetchGeminiModels(context.Background(), client, "token", "cookie=value", "", "", "en", "session", "2")
+	models, _, err := fetchGeminiModels(context.Background(), client, "token", "cookie=value", "", "", "en", "session", "2")
 	if err != nil || len(models) != 1 || models[0].ID != "gemini-3.8-flash" {
 		t.Fatalf("models=%#v, error=%v", models, err)
 	}
@@ -331,7 +379,7 @@ func TestFetchGeminiModelsReportsFailuresWithoutSessionValues(t *testing.T) {
 		client := &http.Client{Transport: modelDiscoveryTransport(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("secret-response"))}, nil
 		})}
-		_, err := fetchGeminiModels(context.Background(), client, "secret-token", "secret-cookie", "", "secret-session", "", "client-session-id", "")
+		_, _, err := fetchGeminiModels(context.Background(), client, "secret-token", "secret-cookie", "", "secret-session", "", "client-session-id", "")
 		if err == nil || !strings.Contains(err.Error(), fmt.Sprint(status)) || strings.Contains(err.Error(), "secret") {
 			t.Fatalf("HTTP error must expose status only: %v", err)
 		}
@@ -339,7 +387,7 @@ func TestFetchGeminiModelsReportsFailuresWithoutSessionValues(t *testing.T) {
 	client := &http.Client{Transport: modelDiscoveryTransport(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("network unavailable")
 	})}
-	_, err := fetchGeminiModels(context.Background(), client, "secret-token", "secret-cookie", "", "secret-session", "", "client-session-id", "")
+	_, _, err := fetchGeminiModels(context.Background(), client, "secret-token", "secret-cookie", "", "secret-session", "", "client-session-id", "")
 	if err == nil || strings.Contains(err.Error(), "secret") || !strings.Contains(err.Error(), "network unavailable") {
 		t.Fatalf("transport error must omit session query: %v", err)
 	}

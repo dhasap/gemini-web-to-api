@@ -76,10 +76,25 @@ func (h *OpenAIController) HandleModel(c fiber.Ctx) error {
 	return c.JSON(models.ModelData{ID: model.ID, Object: "model", Created: model.Created, OwnedBy: model.OwnedBy, DisplayName: model.DisplayName})
 }
 
+// logRequestError logs a failed request. A model the account does not offer is
+// the caller's mistake (HTTP 400), so it is logged without an error stack trace.
+func (h *OpenAIController) logRequestError(msg string, err error, model string) {
+	var modelErr *providers.ModelSelectionError
+	if errors.As(err, &modelErr) {
+		h.log.Info(msg, zap.Error(err), zap.String("model", model))
+		return
+	}
+	h.log.Error(msg, zap.Error(err), zap.String("model", model))
+}
+
 func openAIRequestError(c fiber.Ctx, err error) error {
 	var modelErr *providers.ModelSelectionError
 	if errors.As(err, &modelErr) {
 		return c.Status(fiber.StatusBadRequest).JSON(utils.ErrorToResponse(err, "invalid_request_error"))
+	}
+	if errors.Is(err, ErrInvalidToolCall) {
+		// Gemini answered, but not with a usable tool call; clients may retry.
+		return c.Status(fiber.StatusBadGateway).JSON(utils.ErrorToResponse(err, "api_error"))
 	}
 	return c.Status(fiber.StatusInternalServerError).JSON(utils.ErrorToResponse(err, "api_error"))
 }
@@ -123,7 +138,7 @@ func (h *OpenAIController) HandleChatCompletions(c fiber.Ctx) error {
 				return utils.SendSSEEvent(w, h.log, chunk)
 			})
 			if err != nil {
-				h.log.Error("CreateChatCompletionStream failed", zap.Error(err), zap.String("model", req.Model))
+				h.logRequestError("CreateChatCompletionStream failed", err, req.Model)
 				errChunk := dto.ChatCompletionChunk{
 					ID:      fmt.Sprintf("chatcmpl-err-%d", time.Now().UnixNano()),
 					Object:  "chat.completion.chunk",
@@ -152,7 +167,7 @@ func (h *OpenAIController) HandleChatCompletions(c fiber.Ctx) error {
 
 	response, err := h.service.CreateChatCompletion(ctx, req)
 	if err != nil {
-		h.log.Error("CreateChatCompletion failed", zap.Error(err), zap.String("model", req.Model))
+		h.logRequestError("CreateChatCompletion failed", err, req.Model)
 		return openAIRequestError(c, err)
 	}
 
@@ -184,7 +199,7 @@ func (h *OpenAIController) HandleImageGenerations(c fiber.Ctx) error {
 		if err.Error() == "prompt is required" || err.Error() == "n must be between 1 and 10" {
 			return c.Status(fiber.StatusBadRequest).JSON(utils.ErrorToResponse(err, "invalid_request_error"))
 		}
-		h.log.Error("CreateImageGeneration failed", zap.Error(err), zap.String("model", req.Model))
+		h.logRequestError("CreateImageGeneration failed", err, req.Model)
 		return openAIRequestError(c, err)
 	}
 

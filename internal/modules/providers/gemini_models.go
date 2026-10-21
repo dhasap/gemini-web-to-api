@@ -31,6 +31,10 @@ const (
 	geminiModelHeaderKey = "x-goog-ext-525001261-jspb"
 	geminiUserStatusRPC  = "otAQ7b"
 	maxModelResponseSize = 8 << 20
+	// geminiAutoModelID is the public name of Gemini Web's "Auto" picker entry.
+	// Accounts on that picker list no separate Pro, Flash or Thinking models;
+	// Gemini routes between them and only the thinking level is selectable.
+	geminiAutoModelID = "gemini-auto"
 )
 
 // geminiModel keeps the public name together with the selection data returned
@@ -49,12 +53,14 @@ var (
 	geminiSlugSeparator  = regexp.MustCompile(`[^a-z0-9.]+`)
 )
 
-func fetchGeminiModels(ctx context.Context, client *http.Client, token, cookieHeader, buildLabel, sessionID, language, generationID, authUser string) ([]geminiModel, error) {
+// fetchGeminiModels returns the account's selectable models and a description
+// of every model entry it had to skip, so callers can log what was dropped.
+func fetchGeminiModels(ctx context.Context, client *http.Client, token, cookieHeader, buildLabel, sessionID, language, generationID, authUser string) ([]geminiModel, []string, error) {
 	if client == nil {
-		return nil, errors.New("Gemini model discovery requires an HTTP client")
+		return nil, nil, errors.New("Gemini model discovery requires an HTTP client")
 	}
 	if token == "" || cookieHeader == "" {
-		return nil, errors.New("Gemini model discovery requires an authenticated session")
+		return nil, nil, errors.New("Gemini model discovery requires an authenticated session")
 	}
 	if language == "" {
 		language = "en"
@@ -78,7 +84,7 @@ func fetchGeminiModels(ctx context.Context, client *http.Client, token, cookieHe
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiAccountURL(EndpointBatchExec, authUser)+"?"+query.Encode(), strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("create Gemini model discovery request: %w", err)
+		return nil, nil, fmt.Errorf("create Gemini model discovery request: %w", err)
 	}
 	for name, value := range DefaultHeaders {
 		request.Header.Set(name, value)
@@ -98,26 +104,34 @@ func fetchGeminiModels(ctx context.Context, client *http.Client, token, cookieHe
 		if errors.As(err, &requestErr) {
 			err = requestErr.Err
 		}
-		return nil, fmt.Errorf("Gemini model discovery request failed: %w", err)
+		return nil, nil, fmt.Errorf("Gemini model discovery request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Gemini model discovery failed with HTTP status %d", response.StatusCode)
+		return nil, nil, fmt.Errorf("Gemini model discovery failed with HTTP status %d", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxModelResponseSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("read Gemini model discovery response: %w", err)
+		return nil, nil, fmt.Errorf("read Gemini model discovery response: %w", err)
 	}
 	if len(body) > maxModelResponseSize {
-		return nil, errors.New("Gemini model discovery response is too large")
+		return nil, nil, errors.New("Gemini model discovery response is too large")
 	}
-	return parseGeminiModels(body)
+	return parseGeminiModelsReport(body)
 }
 
 // parseGeminiModels accepts both ordinary batchexecute JSON and the length-
 // prefixed frames following Google's XSSI guard. Frame lengths are JSON numbers;
 // decoding values instead of splitting lines also supports multiline frames.
 func parseGeminiModels(body []byte) ([]geminiModel, error) {
+	models, _, err := parseGeminiModelsReport(body)
+	return models, err
+}
+
+// parseGeminiModelsReport is parseGeminiModels plus a description of each
+// model entry that was skipped, so a change in the RPC format is visible in the
+// logs instead of silently hiding models.
+func parseGeminiModelsReport(body []byte) ([]geminiModel, []string, error) {
 	body = bytes.TrimSpace(body)
 	body = bytes.TrimPrefix(body, []byte(")]}'"))
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -129,17 +143,25 @@ func parseGeminiModels(body []byte) ([]geminiModel, error) {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return nil, errors.New("invalid Gemini model discovery response")
+			return nil, nil, errors.New("invalid Gemini model discovery response")
 		}
 		collectGeminiModelRecords(value, &records)
 	}
 	var models []geminiModel
+	var skipped []string
+	skip := func(reason string, entry any) {
+		raw, _ := json.Marshal(entry)
+		if len(raw) > 300 {
+			raw = append(raw[:300], "..."...)
+		}
+		skipped = append(skipped, reason+": "+string(raw))
+	}
 	seen := make(map[string]bool)
 	publicNames := make(map[string]bool)
 	for _, record := range records {
 		if reject, ok := geminiArrayValue(record, 5).([]any); ok {
 			if code, ok := geminiInteger(geminiArrayValue(reject, 0)); ok && code != 0 {
-				return nil, fmt.Errorf("Gemini model discovery RPC rejected the session (code %d)", code)
+				return nil, nil, fmt.Errorf("Gemini model discovery RPC rejected the session (code %d)", code)
 			}
 		}
 		var status []any
@@ -148,20 +170,20 @@ func parseGeminiModels(body []byte) ([]geminiModel, error) {
 			bodyDecoder := json.NewDecoder(strings.NewReader(value))
 			bodyDecoder.UseNumber()
 			if err := bodyDecoder.Decode(&status); err != nil {
-				return nil, errors.New("invalid Gemini user status response")
+				return nil, nil, errors.New("invalid Gemini user status response")
 			}
 		case []any:
 			status = value
 		default:
-			return nil, errors.New("Gemini model discovery returned no user status")
+			return nil, nil, errors.New("Gemini model discovery returned no user status")
 		}
 		if rawStatus := geminiArrayValue(status, 14); rawStatus != nil {
 			code, ok := geminiInteger(rawStatus)
 			if !ok {
-				return nil, errors.New("invalid Gemini account status")
+				return nil, nil, errors.New("invalid Gemini account status")
 			}
 			if code != 1000 {
-				return nil, fmt.Errorf("Gemini account cannot select models (status %d); verify access and cookies on Gemini Web", code)
+				return nil, nil, fmt.Errorf("Gemini account cannot select models (status %d); verify access and cookies on Gemini Web", code)
 			}
 		}
 		capacity, capacityField := geminiAccountCapacity(geminiArrayValue(status, 16), geminiArrayValue(status, 17))
@@ -169,10 +191,16 @@ func parseGeminiModels(body []byte) ([]geminiModel, error) {
 		for _, entry := range entries {
 			fields, ok := entry.([]any)
 			if !ok {
+				skip("entry is not a list", entry)
 				continue
 			}
 			modelID := geminiFirstString(fields, 0)
-			if modelID == "" || seen[modelID] {
+			if modelID == "" {
+				skip("entry has no model ID", entry)
+				continue
+			}
+			if seen[modelID] {
+				skip("duplicate model ID", entry)
 				continue
 			}
 			category := geminiFirstString(fields, 1, 10)
@@ -194,6 +222,7 @@ func parseGeminiModels(body []byte) ([]geminiModel, error) {
 				var valid bool
 				modelNumber, valid = geminiInteger(rawNumber)
 				if !valid || modelNumber <= 0 {
+					skip("invalid model number", entry)
 					continue
 				}
 			}
@@ -207,9 +236,12 @@ func parseGeminiModels(body []byte) ([]geminiModel, error) {
 		}
 	}
 	if len(models) == 0 {
-		return nil, errors.New("Gemini model discovery returned no available models")
+		if len(skipped) > 0 {
+			return nil, skipped, fmt.Errorf("Gemini model discovery returned no usable models; skipped %s", strings.Join(skipped, "; "))
+		}
+		return nil, nil, errors.New("Gemini model discovery returned no available models")
 	}
-	return models, nil
+	return models, skipped, nil
 }
 
 func collectGeminiModelRecords(value any, records *[][]any) {
@@ -363,13 +395,20 @@ func resolveGeminiModel(requested string, models []geminiModel) (geminiModel, er
 		return matches[0], nil
 	}
 	available := make([]string, 0, len(models))
+	hasAuto := false
 	for _, model := range models {
 		available = append(available, model.ID)
+		hasAuto = hasAuto || strings.EqualFold(model.ID, geminiAutoModelID)
 	}
 	if len(matches) > 1 {
 		return geminiModel{}, &ModelSelectionError{Message: fmt.Sprintf("ambiguous Gemini model %q; available models: %s", requested, strings.Join(available, ", "))}
 	}
-	return geminiModel{}, &ModelSelectionError{Message: fmt.Sprintf("unsupported Gemini model %q; available models: %s", requested, strings.Join(available, ", "))}
+	message := fmt.Sprintf("unsupported Gemini model %q; available models: %s", requested, strings.Join(available, ", "))
+	if hasAuto {
+		message += ". With " + geminiAutoModelID + ", Gemini Web chooses the model itself (Pro only when the account is allowed it); " +
+			"request " + geminiAutoModelID + ", and on the OpenAI API set reasoning_effort (low, medium or high) to choose how deeply it thinks"
+	}
+	return geminiModel{}, &ModelSelectionError{Message: message}
 }
 
 func geminiArrayValue(values []any, index int) any {

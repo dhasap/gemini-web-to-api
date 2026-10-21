@@ -22,7 +22,7 @@ client = anthropic.Anthropic(base_url=f"{BASE_URL}/claude", api_key="not-needed"
 def main() -> int:
     parser = argparse.ArgumentParser(description="Anthropic SDK canvas example")
     parser.add_argument("--prompt", default="Create a Python script for the first 10 Fibonacci numbers")
-    parser.add_argument("--model", default="gemini-pro-canvas")
+    parser.add_argument("--model", default="gemini-auto-canvas")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
 

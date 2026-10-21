@@ -14,13 +14,13 @@ This fork adds working extraction and authenticated downloading of images genera
 
 ## Text-to-image
 
-Use `gemini-pro` when your account offers Pro, or choose another model returned by `GET /openai/v1/models`:
+Use a model returned by `GET /openai/v1/models`:
 
 ```bash
 curl http://localhost:4981/openai/v1/models
 ```
 
-The list comes from the signed-in account's Gemini Web model registry. `gemini-advanced` also selects Pro; either Pro name returns an error when Pro is unavailable. Other names are accepted only when they are discovered from the account, so old Gemini API version names are not mapped to a potentially different web model.
+The list comes from the signed-in account's Gemini Web model registry. Accounts on Gemini Web's Auto picker list only `gemini-auto`, which lets Gemini choose the model (Pro only when the account is allowed it), so the examples below use it. If your account lists Pro, you can use `gemini-pro` instead (`gemini-advanced` is an alias). A Pro name returns HTTP 400 when Pro is not listed. Other names are accepted only when they are discovered from the account, so old Gemini API version names are not mapped to a potentially different web model.
 
 ### cURL
 
@@ -28,7 +28,7 @@ The list comes from the signed-in account's Gemini Web model registry. `gemini-a
 curl http://localhost:4981/openai/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gemini-pro",
+    "model": "gemini-auto",
     "prompt": "Generate an image of a red apple on a white plate.",
     "size": "1024x1024",
     "n": 1,
@@ -59,7 +59,7 @@ import requests
 response = requests.post(
     "http://localhost:4981/openai/v1/images/generations",
     json={
-        "model": "gemini-pro",
+        "model": "gemini-auto",
         "prompt": "Generate an image of a red apple on a white plate.",
         "size": "1024x1024",
         "n": 1,
@@ -86,7 +86,7 @@ client = OpenAI(
 )
 
 response = client.images.generate(
-    model="gemini-pro",
+    model="gemini-auto",
     prompt="Generate an image of a red apple on a white plate.",
     size="1024x1024",
     response_format="b64_json",
@@ -116,7 +116,7 @@ def data_url(path: str, mime_type: str) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 response = client.chat.completions.create(
-    model="gemini-pro",
+    model="gemini-auto",
     messages=[
         {
             "role": "user",

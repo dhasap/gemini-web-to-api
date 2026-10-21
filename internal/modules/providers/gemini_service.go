@@ -334,9 +334,12 @@ func (c *Client) refreshSessionToken(ctx context.Context) error {
 	}
 	generationID := c.generationID
 	c.mu.Unlock()
-	models, err := fetchGeminiModels(ctx, hClient, matches[1], cookieStr, buildLabel, sessionID, language, generationID, c.authUser)
+	models, skipped, err := fetchGeminiModels(ctx, hClient, matches[1], cookieStr, buildLabel, sessionID, language, generationID, c.authUser)
 	if err != nil {
 		return fmt.Errorf("failed to discover Gemini models: %w", err)
+	}
+	for _, entry := range skipped {
+		c.log.Warn("Skipped a Gemini model entry during discovery", zap.String("entry", entry))
 	}
 
 	c.mu.Lock()

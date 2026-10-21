@@ -6,7 +6,8 @@ have no canvas parameter: Artifacts, ChatGPT Canvas and Gemini Canvas exist only
 in the web apps. The bridge therefore uses each SDK's normal chat call:
 
 - **Turn it on with the model name**: append `-canvas` to any model, e.g.
-  `gemini-3.1-pro-canvas` or the alias `gemini-pro-canvas`. No extra parameters.
+  `gemini-auto-canvas`, or `gemini-pro-canvas` on accounts that list Pro. No
+  extra parameters.
 - **Read it as SDK data**: every canvas is returned as a file object you read
   through the SDK (table below), and it is also inlined in the reply text in
   place of Gemini's `immersive_entry_chip` link (code as a fenced block,
@@ -56,7 +57,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://localhost:4981/openai/v1", api_key="not-needed")
 message = client.chat.completions.create(
-    model="gemini-pro-canvas",
+    model="gemini-auto-canvas",
     messages=[{"role": "user", "content": "Create a simple todo list web app"}],
 ).choices[0].message
 for canvas in message.canvases:
@@ -70,7 +71,7 @@ from google import genai
 
 client = genai.Client(api_key="not-needed",
                       http_options={"base_url": "http://localhost:4981/gemini", "api_version": "v1beta"})
-response = client.models.generate_content(model="gemini-pro-canvas", contents="Write a short essay about coffee")
+response = client.models.generate_content(model="gemini-auto-canvas", contents="Write a short essay about coffee")
 for part in response.candidates[0].content.parts:
     if part.inline_data:
         open(part.inline_data.display_name, "wb").write(part.inline_data.data)
@@ -80,10 +81,10 @@ Plain HTTP:
 
 ```bash
 curl http://localhost:4981/openai/v1/chat/completions -H "Content-Type: application/json" \
-  -d '{"model": "gemini-pro-canvas", "messages": [{"role": "user", "content": "Create a counter web app"}]}'
+  -d '{"model": "gemini-auto-canvas", "messages": [{"role": "user", "content": "Create a counter web app"}]}'
 ```
 
-`GET /openai/v1/models/gemini-pro-canvas` resolves the canvas variant; the
+`GET /openai/v1/models/gemini-auto-canvas` resolves the canvas variant; the
 response `model` keeps the `-canvas` suffix.
 
 ## How it works

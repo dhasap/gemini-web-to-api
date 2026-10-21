@@ -39,7 +39,7 @@ def main() -> int:
 
     print("Generating music; Gemini usually needs 1-3 minutes...")
     audio = client.audio.speech.create(
-        model="gemini-pro-music",
+        model="gemini-auto-music",
         voice=args.voice,
         input=args.prompt,
         extra_body=extra,

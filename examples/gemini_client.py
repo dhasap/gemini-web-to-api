@@ -11,13 +11,14 @@ client = genai.Client(
 )
 
 # Model IDs are discovered from the signed-in Gemini Web account. Use one of
-# the IDs returned here; gemini-advanced remains an alias for gemini-pro.
+# the IDs returned here: accounts on Gemini's Auto picker list only gemini-auto;
+# accounts that list Pro can use gemini-pro (alias gemini-advanced).
 print("Available models:", [model.name for model in client.models.list()])
 
 image_path = Path(__file__).with_name("fiber.png")
 
 response = client.models.generate_content(
-    model="gemini-advanced",
+    model="gemini-auto",
     contents=[
         types.Content(
             role="user",

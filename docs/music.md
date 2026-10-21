@@ -6,7 +6,7 @@ through each SDK's audio-output call:
 | SDK          | Call                                                         | Track                                       | Example                                                            |
 | ------------ | ------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------ |
 | OpenAI       | `client.audio.speech.create(model, voice, input)`            | response body (`write_to_file`)             | [`openai_music_client.py`](../examples/openai_music_client.py)      |
-| Google GenAI | `client.models.generate_content(model="gemini-pro-music")`   | `inline_data` part (`mime_type`, `data`)     | [`gemini_music_client.py`](../examples/gemini_music_client.py)      |
+| Google GenAI | `client.models.generate_content(model="gemini-auto-music")`  | `inline_data` part (`mime_type`, `data`)     | [`gemini_music_client.py`](../examples/gemini_music_client.py)      |
 
 The Claude API has no audio output, so there is no Claude endpoint. A track
 takes 1–3 minutes and uses the account's music quota.
@@ -19,7 +19,7 @@ Gemini Web has no text-to-speech, so this endpoint creates music:
 | -------------- | ------------------------------------------------------------------------- |
 | `input`        | The music prompt (required).                                              |
 | `voice`        | `instrumental` or `vocals`; any other voice lets Gemini decide.           |
-| `model`        | Any Gemini model (`gemini-pro-music`, `gemini-pro`); `tts-*` uses the default. |
+| `model`        | Any Gemini model (`gemini-auto-music`, `gemini-auto`); `tts-*` uses the default. |
 | `instructions` | Appended to the prompt as style guidance.                                 |
 | `length`       | Extension: `short` or `standard`.                                         |
 | `genre`        | Extension: `pop`, `hip-hop`, `rock`, `k-pop`, `latin`, `electronic`, `r&b`, `country`, `afrobeats`, `reggae`, `jazz`, `classical`, `folk`, `lo-fi`, `acoustic`, `cinematic`, `ambient`. |
@@ -29,7 +29,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://localhost:4981/openai/v1", api_key="not-needed", timeout=600, max_retries=0)
 audio = client.audio.speech.create(
-    model="gemini-pro-music",
+    model="gemini-auto-music",
     voice="instrumental",
     input="A calm lo-fi beat for studying",
     extra_body={"length": "short", "genre": "lo-fi"},
@@ -51,7 +51,7 @@ from google.genai import types
 
 client = genai.Client(api_key="not-needed", http_options=types.HttpOptions(
     base_url="http://localhost:4981/gemini", api_version="v1beta", timeout=600_000))
-response = client.models.generate_content(model="gemini-pro-music", contents="An upbeat pop song about coffee")
+response = client.models.generate_content(model="gemini-auto-music", contents="An upbeat pop song about coffee")
 for part in response.candidates[0].content.parts:
     if part.inline_data:
         open("coffee.mp3", "wb").write(part.inline_data.data)

@@ -25,7 +25,7 @@ client = genai.Client(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Google GenAI SDK canvas example")
     parser.add_argument("--prompt", default="Write a short essay about coffee")
-    parser.add_argument("--model", default="gemini-pro-canvas")
+    parser.add_argument("--model", default="gemini-auto-canvas")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
 

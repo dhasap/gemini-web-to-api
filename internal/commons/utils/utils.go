@@ -222,6 +222,50 @@ func ExtractFirstJSONObject(text string) string {
 	return ""
 }
 
+// EscapeJSONStringControlChars escapes raw control characters (such as
+// newlines) that appear inside JSON string literals. LLMs often write
+// multi-line values without escaping them, which encoding/json rejects.
+func EscapeJSONStringControlChars(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	inString := false
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		if !inString {
+			if ch == '"' {
+				inString = true
+			}
+			b.WriteByte(ch)
+			continue
+		}
+		if escaped {
+			escaped = false
+			b.WriteByte(ch)
+			continue
+		}
+		switch {
+		case ch == '\\':
+			escaped = true
+			b.WriteByte(ch)
+		case ch == '"':
+			inString = false
+			b.WriteByte(ch)
+		case ch == '\n':
+			b.WriteString(`\n`)
+		case ch == '\r':
+			b.WriteString(`\r`)
+		case ch == '\t':
+			b.WriteString(`\t`)
+		case ch < 0x20:
+			fmt.Fprintf(&b, `\u%04x`, ch)
+		default:
+			b.WriteByte(ch)
+		}
+	}
+	return b.String()
+}
+
 // SleepWithCancel sleeps for the specified duration or until context is cancelled
 func SleepWithCancel(ctx context.Context, duration time.Duration) bool {
 	select {

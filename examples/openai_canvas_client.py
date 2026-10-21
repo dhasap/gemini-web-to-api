@@ -22,7 +22,7 @@ client = OpenAI(base_url=f"{BASE_URL}/openai/v1", api_key="not-needed")
 def main() -> int:
     parser = argparse.ArgumentParser(description="OpenAI SDK canvas example")
     parser.add_argument("--prompt", default="Create a simple todo list web app")
-    parser.add_argument("--model", default="gemini-pro-canvas")
+    parser.add_argument("--model", default="gemini-auto-canvas")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
 

@@ -10,9 +10,10 @@ client = OpenAI(
 
 def image_generation_example():
     # Inspect client.models.list() for the account's selectable web models.
-    # gemini-pro selects Pro; unavailable Pro returns an error.
+    # gemini-auto lets Gemini choose the model; accounts that list Pro can use
+    # gemini-pro instead (an unlisted model returns HTTP 400).
     response = client.images.generate(
-        model="gemini-pro",
+        model="gemini-auto",
         prompt="A cinematic cyberpunk rabbit wearing a yellow raincoat, neon city, high detail",
         n=1,
         size="1024x1024",
